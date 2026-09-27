@@ -1,0 +1,32 @@
+# .NET build output
+**/bin/
+**/obj/
+*.user
+.vs/
+
+# Node/Vite build output
+**/node_modules/
+**/dist/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+appsettings.*.local.json
+secrets.json
+
+# Local certificates and private keys
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Captured YTMD payloads can be large and may contain personalized data.
+Result.txt
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
