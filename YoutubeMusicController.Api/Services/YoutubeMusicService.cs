@@ -1,4 +1,5 @@
 ﻿using System.Net.Http.Json;
+using System.Net;
 using System.Text.Json;
 using YoutubeMusicController.Api.Models;
 
@@ -91,6 +92,68 @@ public sealed class YoutubeMusicService
                 videoId,
                 insertPosition = "INSERT_AT_END"
             },
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<QueueResponse> GetQueueAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await _client.GetAsync(
+            "/api/v1/queue",
+            cancellationToken);
+
+        if (response.StatusCode == HttpStatusCode.NoContent)
+        {
+            return new QueueResponse([], null, false, false);
+        }
+
+        response.EnsureSuccessStatusCode();
+
+        await using var contentStream = await response.Content.ReadAsStreamAsync(
+            cancellationToken);
+        using var document = await JsonDocument.ParseAsync(
+            contentStream,
+            cancellationToken: cancellationToken);
+
+        return YoutubeMusicQueueParser.Parse(document);
+    }
+
+    public async Task RemoveQueueItemAsync(
+        int index,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await _client.DeleteAsync(
+            $"/api/v1/queue/{index}",
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task MoveQueueItemAsync(
+        int index,
+        int toIndex,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Patch,
+            $"/api/v1/queue/{index}")
+        {
+            Content = JsonContent.Create(new { toIndex })
+        };
+        using var response = await _client.SendAsync(
+            request,
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task ClearQueueAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await _client.DeleteAsync(
+            "/api/v1/queue",
             cancellationToken);
 
         response.EnsureSuccessStatusCode();

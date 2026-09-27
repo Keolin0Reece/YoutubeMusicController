@@ -2,7 +2,10 @@ import { useEffect, useState, type FormEvent } from "react";
 import "./App.css";
 
 const API_URL =
-  import.meta.env.VITE_API_URL ?? "http://localhost:5161";
+  (import.meta.env.VITE_API_URL ?? "http://localhost:5161").replace(
+    /\/$/,
+    ""
+  );
 
 interface NowPlaying {
   title: string | null;
@@ -43,6 +46,32 @@ interface QueueNotice {
   message: string;
 }
 
+interface QueueItem {
+  index: number;
+  title: string;
+  artists: string[];
+  album: string | null;
+  duration: string | null;
+  imageSrc: string | null;
+  videoId: string;
+  isSelected: boolean;
+  canReorder: boolean;
+}
+
+interface QueueResponse {
+  items: QueueItem[];
+  selectedIndex: number | null;
+  autoPlaying: boolean;
+  hasMore: boolean;
+}
+
+interface RealtimeMessage {
+  type: string;
+  song?: NowPlaying;
+  isPlaying?: boolean;
+  position?: number;
+}
+
 function App() {
   const [connected, setConnected] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(null);
@@ -66,6 +95,16 @@ function App() {
   const [queueNotice, setQueueNotice] = useState<QueueNotice | null>(
     null
   );
+  const [queue, setQueue] = useState<QueueResponse | null>(null);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueMutation, setQueueMutation] = useState<string | null>(
+    null
+  );
+  const [queueError, setQueueError] = useState<string | null>(null);
+  const [queueManagementNotice, setQueueManagementNotice] =
+    useState<QueueNotice | null>(null);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
 
   const fetchNowPlaying = async () => {
     try {
@@ -85,6 +124,33 @@ function App() {
     } catch {
       setNowPlaying(null);
       setConnected(false);
+    }
+  };
+
+  const fetchQueue = async (showLoading = false) => {
+    try {
+      if (showLoading) {
+        setQueueLoading(true);
+      }
+
+      setQueueError(null);
+
+      const response = await fetch(`${API_URL}/api/ytmd/queue`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data: QueueResponse = await response.json();
+      setQueue(data);
+      setConnected(true);
+    } catch (error) {
+      console.error(error);
+      setQueueError("Unable to load the YouTube Music queue.");
+    } finally {
+      if (showLoading) {
+        setQueueLoading(false);
+      }
     }
   };
 
@@ -259,6 +325,7 @@ function App() {
         type: "success",
         message: `Added “${result.title}” to the end of the queue.`,
       });
+      await fetchQueue();
     } catch (error) {
       console.error(error);
       setQueueNotice({
@@ -273,16 +340,208 @@ function App() {
     }
   };
 
+  const removeQueueItem = async (item: QueueItem) => {
+    try {
+      setQueueMutation(`remove-${item.index}`);
+      setQueueManagementNotice(null);
+
+      const response = await fetch(
+        `${API_URL}/api/ytmd/queue/${item.index}`,
+        { method: "DELETE" }
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      setQueueManagementNotice({
+        type: "success",
+        message: `Removed “${item.title}” from the queue.`,
+      });
+      await fetchQueue();
+    } catch (error) {
+      console.error(error);
+      setQueueManagementNotice({
+        type: "error",
+        message: "Unable to remove that queue item.",
+      });
+    } finally {
+      setQueueMutation(null);
+    }
+  };
+
+  const moveQueueItem = async (item: QueueItem, toIndex: number) => {
+    try {
+      setQueueMutation(`move-${item.index}`);
+      setQueueManagementNotice(null);
+
+      const response = await fetch(
+        `${API_URL}/api/ytmd/queue/${item.index}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ toIndex }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      await fetchQueue();
+    } catch (error) {
+      console.error(error);
+      setQueueManagementNotice({
+        type: "error",
+        message: "Unable to reorder the queue.",
+      });
+    } finally {
+      setQueueMutation(null);
+    }
+  };
+
+  const clearQueue = async () => {
+    try {
+      setQueueMutation("clear");
+      setQueueManagementNotice(null);
+
+      const response = await fetch(`${API_URL}/api/ytmd/queue`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      setConfirmingClear(false);
+      setQueueManagementNotice({
+        type: "success",
+        message: "The queue was cleared.",
+      });
+      await fetchQueue();
+    } catch (error) {
+      console.error(error);
+      setQueueManagementNotice({
+        type: "error",
+        message: "Unable to clear the queue.",
+      });
+    } finally {
+      setQueueMutation(null);
+    }
+  };
+
   useEffect(() => {
-    const initialRefresh = setTimeout(fetchNowPlaying, 0);
+    const initialRefresh = setTimeout(() => {
+      fetchNowPlaying();
+      fetchQueue(true);
+    }, 0);
 
     const interval = setInterval(() => {
       fetchNowPlaying();
-    }, 3000);
+      fetchQueue();
+    }, 30000);
 
     return () => {
       clearTimeout(initialRefresh);
       clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    let stopped = false;
+
+    const connect = () => {
+      const socketUrl = `${API_URL.replace(/^http/, "ws")}/api/ytmd/realtime`;
+      socket = new WebSocket(socketUrl);
+
+      socket.onopen = () => {
+        reconnectAttempt = 0;
+        setRealtimeConnected(true);
+        setConnected(true);
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const update: RealtimeMessage = JSON.parse(event.data);
+
+          if (
+            (update.type === "PLAYER_INFO" ||
+              update.type === "VIDEO_CHANGED") &&
+            update.song
+          ) {
+            setNowPlaying({
+              ...update.song,
+              isPaused:
+                update.isPlaying === undefined
+                  ? update.song.isPaused
+                  : !update.isPlaying,
+              elapsedSeconds:
+                update.position ?? update.song.elapsedSeconds,
+            });
+            setConnected(true);
+
+            if (update.type === "VIDEO_CHANGED") {
+              fetchQueue();
+            }
+          } else if (update.type === "PLAYER_STATE_CHANGED") {
+            setNowPlaying((current) =>
+              current
+                ? {
+                    ...current,
+                    isPaused:
+                      update.isPlaying === undefined
+                        ? current.isPaused
+                        : !update.isPlaying,
+                    elapsedSeconds:
+                      update.position ?? current.elapsedSeconds,
+                  }
+                : current
+            );
+          } else if (
+            update.type === "POSITION_CHANGED" &&
+            update.position !== undefined
+          ) {
+            setNowPlaying((current) =>
+              current
+                ? { ...current, elapsedSeconds: update.position! }
+                : current
+            );
+          }
+        } catch (error) {
+          console.error("Unable to read realtime update", error);
+        }
+      };
+
+      socket.onerror = () => {
+        socket?.close();
+      };
+
+      socket.onclose = () => {
+        setRealtimeConnected(false);
+
+        if (!stopped) {
+          const delay = Math.min(1000 * 2 ** reconnectAttempt, 30000);
+          reconnectAttempt++;
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+
+      socket?.close();
     };
   }, []);
 
@@ -313,9 +572,11 @@ function App() {
           >
             <span className="connection-dot" />
 
-            {connected
-              ? "Connected"
-              : "Disconnected"}
+            {realtimeConnected
+              ? "Live"
+              : connected
+                ? "Connected"
+                : "Disconnected"}
           </div>
         </header>
 
@@ -543,6 +804,185 @@ function App() {
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+        </section>
+
+        <section className="queue-section">
+          <div className="queue-heading">
+            <div>
+              <span className="feature-icon" aria-hidden="true">
+                ≡
+              </span>
+
+              <div>
+                <strong>Current Queue</strong>
+                <p>
+                  {realtimeConnected
+                    ? "Live playback updates are connected."
+                    : "Using recovery polling while live updates reconnect."}
+                </p>
+              </div>
+            </div>
+
+            <div className="queue-header-actions">
+              <button
+                type="button"
+                onClick={() => fetchQueue(true)}
+                disabled={queueLoading || queueMutation !== null}
+              >
+                Refresh
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => setConfirmingClear(true)}
+                disabled={
+                  !queue?.items.length ||
+                  queueLoading ||
+                  queueMutation !== null
+                }
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+
+          {confirmingClear && (
+            <div className="clear-confirmation" role="alertdialog">
+              <span>Clear every item from the playback queue?</span>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingClear(false)}
+                  disabled={queueMutation !== null}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="confirm-danger"
+                  onClick={clearQueue}
+                  disabled={queueMutation !== null}
+                >
+                  {queueMutation === "clear" ? "Clearing…" : "Clear queue"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {queueManagementNotice && (
+            <div
+              className={`queue-notice ${queueManagementNotice.type}`}
+              role={
+                queueManagementNotice.type === "error" ? "alert" : "status"
+              }
+            >
+              {queueManagementNotice.message}
+            </div>
+          )}
+
+          {queueError && (
+            <div className="search-state error" role="alert">
+              {queueError}
+            </div>
+          )}
+
+          {queueLoading && !queue && (
+            <div className="search-state">Loading queue…</div>
+          )}
+
+          {!queueLoading && queue && queue.items.length === 0 && (
+            <div className="search-state">The playback queue is empty.</div>
+          )}
+
+          {queue && queue.items.length > 0 && (
+            <div className="queue-content">
+              <div className="results-summary">
+                <span>
+                  {queue.items.length}{" "}
+                  {queue.items.length === 1 ? "visible item" : "visible items"}
+                </span>
+                <span>{queue.autoPlaying ? "Autoplay on" : "Autoplay off"}</span>
+              </div>
+
+              <ol className="queue-list" aria-live="polite">
+                {queue.items.map((item, visibleIndex) => (
+                  <li
+                    key={`${item.videoId}-${item.index}`}
+                    className={`queue-item ${item.isSelected ? "selected" : ""}`}
+                  >
+                    <span className="queue-position">
+                      {item.isSelected ? "▶" : item.index + 1}
+                    </span>
+
+                    <div className="queue-art">
+                      {item.imageSrc ? (
+                        <img src={item.imageSrc} alt="" />
+                      ) : (
+                        <span aria-hidden="true">♫</span>
+                      )}
+                    </div>
+
+                    <div className="queue-item-info">
+                      <strong title={item.title}>{item.title}</strong>
+                      <span>
+                        {item.artists.length > 0
+                          ? item.artists.join(", ")
+                          : "Unknown artist"}
+                      </span>
+                      {item.album && <small>{item.album}</small>}
+                    </div>
+
+                    {item.duration && (
+                      <time className="queue-duration">{item.duration}</time>
+                    )}
+
+                    <div className="queue-item-actions">
+                      <button
+                        type="button"
+                        onClick={() => moveQueueItem(item, item.index - 1)}
+                        disabled={
+                          queueMutation !== null ||
+                          !item.canReorder ||
+                          item.index === 0
+                        }
+                        aria-label={`Move ${item.title} up`}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveQueueItem(item, item.index + 1)}
+                        disabled={
+                          queueMutation !== null ||
+                          !item.canReorder ||
+                          (visibleIndex === queue.items.length - 1 &&
+                            !queue.hasMore)
+                        }
+                        aria-label={`Move ${item.title} down`}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        className="remove"
+                        onClick={() => removeQueueItem(item)}
+                        disabled={queueMutation !== null || item.isSelected}
+                        aria-label={`Remove ${item.title} from queue`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+
+              {queue.hasMore && (
+                <p className="queue-more-note">
+                  YouTube Music has more queued items beyond this visible segment.
+                </p>
+              )}
             </div>
           )}
         </section>
