@@ -7,6 +7,9 @@ namespace YoutubeMusicController.Api.Services;
 
 public sealed class YoutubeMusicService
 {
+    private const string SongsSearchParams =
+        "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
+
     private readonly HttpClient _client;
 
     public YoutubeMusicService(IHttpClientFactory httpClientFactory)
@@ -48,6 +51,94 @@ public sealed class YoutubeMusicService
         SearchRequest request,
         CancellationToken cancellationToken = default)
     {
+        if (!string.IsNullOrWhiteSpace(request.Params) ||
+            !string.IsNullOrWhiteSpace(request.Continuation) ||
+            string.IsNullOrWhiteSpace(request.Query))
+        {
+            return await ExecuteSearchAsync(request, cancellationToken);
+        }
+
+        var songsRequest = request with { Params = SongsSearchParams };
+        var songsAttempt = await TrySearchAsync(
+            songsRequest,
+            cancellationToken);
+        var alternateQuery = GetConnectorlessQuery(request.Query);
+        var alternateSongsAttempt = alternateQuery is null
+            ? null
+            : await TrySearchAsync(
+                songsRequest with { Query = alternateQuery },
+                cancellationToken);
+        var broadAttempt = await TrySearchAsync(request, cancellationToken);
+
+        if (songsAttempt.Response is null &&
+            broadAttempt.Response is null &&
+            alternateSongsAttempt?.Response is null)
+        {
+            throw new HttpRequestException(
+                "YouTube Music search failed.",
+                new AggregateException(
+                    new[]
+                    {
+                        songsAttempt.Error,
+                        alternateSongsAttempt?.Error,
+                        broadAttempt.Error
+                    }
+                        .OfType<Exception>()));
+        }
+
+        var mergedResults = YoutubeMusicSearchRanker.MergeAndRank(
+            request.Query,
+            (songsAttempt.Response?.Results ?? [])
+                .Concat(alternateSongsAttempt?.Response?.Results ?? []),
+            broadAttempt.Response?.Results ?? []);
+
+        return new SearchResponse(
+            mergedResults,
+            songsAttempt.Response?.Continuation ??
+                broadAttempt.Response?.Continuation);
+    }
+
+    private static string? GetConnectorlessQuery(string query)
+    {
+        const string Connector = " by ";
+        var connectorIndex = query.LastIndexOf(
+            Connector,
+            StringComparison.OrdinalIgnoreCase);
+
+        if (connectorIndex <= 0 ||
+            connectorIndex + Connector.Length >= query.Length)
+        {
+            return null;
+        }
+
+        var title = query[..connectorIndex].Trim();
+        var artist = query[(connectorIndex + Connector.Length)..].Trim();
+
+        return title.Length > 0 && artist.Length > 0
+            ? $"{title} {artist}"
+            : null;
+    }
+
+    private async Task<SearchAttempt> TrySearchAsync(
+        SearchRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return new SearchAttempt(
+                await ExecuteSearchAsync(request, cancellationToken),
+                null);
+        }
+        catch (HttpRequestException ex)
+        {
+            return new SearchAttempt(null, ex);
+        }
+    }
+
+    private async Task<SearchResponse> ExecuteSearchAsync(
+        SearchRequest request,
+        CancellationToken cancellationToken)
+    {
         var payload = new Dictionary<string, string>();
 
         if (!string.IsNullOrWhiteSpace(request.Query))
@@ -80,6 +171,10 @@ public sealed class YoutubeMusicService
 
         return YoutubeMusicSearchParser.Parse(document);
     }
+
+    private sealed record SearchAttempt(
+        SearchResponse? Response,
+        HttpRequestException? Error);
 
     public async Task AddToQueueAsync(
         string videoId,
