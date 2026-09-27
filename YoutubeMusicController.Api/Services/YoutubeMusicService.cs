@@ -80,6 +80,22 @@ public sealed class YoutubeMusicService
         return YoutubeMusicSearchParser.Parse(document);
     }
 
+    public async Task AddToQueueAsync(
+        string videoId,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await _client.PostAsJsonAsync(
+            "/api/v1/queue",
+            new
+            {
+                videoId,
+                insertPosition = "INSERT_AT_END"
+            },
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
     public async Task TogglePlayPauseAsync(
         CancellationToken cancellationToken = default)
     {

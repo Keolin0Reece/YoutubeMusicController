@@ -38,6 +38,11 @@ interface SearchResponse {
   continuation: string | null;
 }
 
+interface QueueNotice {
+  type: "success" | "error";
+  message: string;
+}
+
 function App() {
   const [connected, setConnected] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(null);
@@ -52,6 +57,15 @@ function App() {
     null
   );
   const [hasSearched, setHasSearched] = useState(false);
+  const [queueingVideoId, setQueueingVideoId] = useState<
+    string | null
+  >(null);
+  const [queuedVideoIds, setQueuedVideoIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [queueNotice, setQueueNotice] = useState<QueueNotice | null>(
+    null
+  );
 
   const fetchNowPlaying = async () => {
     try {
@@ -171,6 +185,7 @@ function App() {
     try {
       setSearchLoading(true);
       setSearchError(null);
+      setQueueNotice(null);
       setHasSearched(true);
 
       const response = await fetch(`${API_URL}/api/ytmd/search`, {
@@ -206,6 +221,55 @@ function App() {
       );
     } finally {
       setSearchLoading(false);
+    }
+  };
+
+  const addToQueue = async (result: SearchResult) => {
+    try {
+      setQueueingVideoId(result.videoId);
+      setQueueNotice(null);
+
+      const response = await fetch(`${API_URL}/api/ytmd/queue`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ videoId: result.videoId }),
+      });
+
+      if (!response.ok) {
+        let detail = "Unable to add this track to the queue.";
+
+        try {
+          const problem: { detail?: string } = await response.json();
+          detail = problem.detail ?? detail;
+        } catch {
+          // Keep the friendly fallback when the server has no JSON body.
+        }
+
+        throw new Error(detail);
+      }
+
+      setQueuedVideoIds((current) => {
+        const updated = new Set(current);
+        updated.add(result.videoId);
+        return updated;
+      });
+      setQueueNotice({
+        type: "success",
+        message: `Added “${result.title}” to the end of the queue.`,
+      });
+    } catch (error) {
+      console.error(error);
+      setQueueNotice({
+        type: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unable to add this track to the queue.",
+      });
+    } finally {
+      setQueueingVideoId(null);
     }
   };
 
@@ -404,6 +468,15 @@ function App() {
             </div>
           )}
 
+          {queueNotice && (
+            <div
+              className={`queue-notice ${queueNotice.type}`}
+              role={queueNotice.type === "error" ? "alert" : "status"}
+            >
+              {queueNotice.message}
+            </div>
+          )}
+
           {!searchLoading &&
             !searchError &&
             hasSearched &&
@@ -444,9 +517,28 @@ function App() {
                       {result.album && <small>{result.album}</small>}
                     </div>
 
-                    <div className="result-meta">
-                      <span>{result.mediaType}</span>
-                      {result.duration && <time>{result.duration}</time>}
+                    <div className="result-actions">
+                      <div className="result-meta">
+                        <span>{result.mediaType}</span>
+                        {result.duration && <time>{result.duration}</time>}
+                      </div>
+
+                      <button
+                        type="button"
+                        className="queue-button"
+                        onClick={() => addToQueue(result)}
+                        disabled={
+                          queueingVideoId !== null ||
+                          queuedVideoIds.has(result.videoId)
+                        }
+                        aria-label={`Add ${result.title} to queue`}
+                      >
+                        {queuedVideoIds.has(result.videoId)
+                          ? "Added"
+                          : queueingVideoId === result.videoId
+                            ? "Adding…"
+                            : "+ Queue"}
+                      </button>
                     </div>
                   </li>
                 ))}

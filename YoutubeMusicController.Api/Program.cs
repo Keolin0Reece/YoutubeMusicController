@@ -93,6 +93,35 @@ app.MapGet("/api/ytmd/now-playing", async (
     }
 });
 
+app.MapPost("/api/ytmd/queue", async (
+    AddToQueueRequest request,
+    YoutubeMusicService youtubeMusicService,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.VideoId))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [nameof(request.VideoId)] = ["A video ID is required."]
+        });
+    }
+
+    try
+    {
+        await youtubeMusicService.AddToQueueAsync(
+            request.VideoId.Trim(),
+            cancellationToken);
+
+        return Results.NoContent();
+    }
+    catch (HttpRequestException ex)
+    {
+        return Results.Problem(
+            detail: ex.Message,
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
 app.MapPost("/api/ytmd/play-pause", async (
     YoutubeMusicService youtubeMusicService,
     CancellationToken cancellationToken) =>
