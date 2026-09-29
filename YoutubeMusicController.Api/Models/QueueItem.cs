@@ -2,6 +2,7 @@ namespace YoutubeMusicController.Api.Models;
 
 public sealed record QueueItem(
     int Index,
+    string? InstanceId,
     string Title,
     IReadOnlyList<string> Artists,
     string? Album,

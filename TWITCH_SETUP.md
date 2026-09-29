@@ -42,11 +42,12 @@ Once connected, the controller recognizes these Twitch chat commands:
 !queue
 ```
 
-Song requests are searched and added to the end of the queue. The same song can
-be queued again after 10 minutes, even if an earlier copy is still present. The
-repeat timer is held in memory and resets whenever the API stops. It applies to
-tracks added through Twitch or the controller dashboard; tracks added directly
-inside YTMD do not have a known timestamp.
+Song requests are searched and added to the end of the queue. A requested song
+cannot be queued again while it is waiting or playing. Its 10-minute repeat
+timer starts when that queued copy finishes or is skipped. The timer is held in
+memory and resets whenever the API stops. It applies to tracks added through
+Twitch or the controller dashboard; tracks added directly inside YTMD are not
+tracked.
 
 The repeat window can be changed under `QueuePolicy` in `appsettings.json`.
 Viewer cooldowns and maximum query length can be changed under

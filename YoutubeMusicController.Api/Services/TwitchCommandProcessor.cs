@@ -171,7 +171,7 @@ public sealed partial class TwitchCommandProcessor
                 out var reservation,
                 out var repeatRemaining))
         {
-            return $"@{chatMessage.DisplayName} “{Sanitize(result.Title)}” can be requested again in {SongRepeatCooldown.FormatRemaining(repeatRemaining)}.";
+            return $"@{chatMessage.DisplayName} “{Sanitize(result.Title)}”: {_songRepeatCooldown.GetBlockedMessage(repeatRemaining)}";
         }
 
         try
@@ -188,10 +188,21 @@ public sealed partial class TwitchCommandProcessor
 
         _userSongCooldowns[chatMessage.UserId] = now;
 
-        var queueAfter = await youtubeMusicService.GetQueueAsync(
-            cancellationToken);
-        var queuedItem = queueAfter.Items.LastOrDefault(item =>
-            item.VideoId == result.VideoId);
+        QueueItem? queuedItem = null;
+
+        try
+        {
+            var queueAfter = await youtubeMusicService.GetQueueAsync(
+                cancellationToken);
+            queuedItem = queueAfter.Items.LastOrDefault(item =>
+                item.VideoId == result.VideoId);
+        }
+        finally
+        {
+            _songRepeatCooldown.ConfirmQueued(
+                reservation,
+                queuedItem?.InstanceId);
+        }
         var artist = result.Artists.FirstOrDefault() ?? "Unknown artist";
         var position = queuedItem is null
             ? string.Empty

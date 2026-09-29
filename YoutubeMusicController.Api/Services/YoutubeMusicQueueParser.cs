@@ -89,6 +89,9 @@ internal static class YoutubeMusicQueueParser
 
         item = new QueueItem(
             index,
+            TryGetString(renderer, "playlistSetVideoId", out var instanceId)
+                ? instanceId
+                : null,
             title,
             artists,
             albumRun.ValueKind == JsonValueKind.Undefined ? null : GetText(albumRun),

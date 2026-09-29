@@ -16,6 +16,7 @@ builder.Services.AddHttpClient("Ytmd", client =>
 builder.Services.AddScoped<YoutubeMusicService>();
 builder.Services.AddSingleton<YoutubeMusicRealtimeProxy>();
 builder.Services.AddSingleton<SongRepeatCooldown>();
+builder.Services.AddHostedService<SongPlaybackMonitor>();
 builder.Services.AddSingleton<TwitchCommandProcessor>();
 builder.Services.AddSingleton<TwitchChatService>();
 builder.Services.AddHostedService(serviceProvider =>
@@ -205,7 +206,7 @@ app.MapPost("/api/ytmd/queue", async (
             out var repeatRemaining))
     {
         return Results.Problem(
-            detail: $"This song can be queued again in {SongRepeatCooldown.FormatRemaining(repeatRemaining)}.",
+            detail: songRepeatCooldown.GetBlockedMessage(repeatRemaining),
             statusCode: StatusCodes.Status409Conflict);
     }
 
@@ -214,8 +215,6 @@ app.MapPost("/api/ytmd/queue", async (
         await youtubeMusicService.AddToQueueAsync(
             request.VideoId.Trim(),
             cancellationToken);
-
-        return Results.NoContent();
     }
     catch (HttpRequestException ex)
     {
@@ -229,6 +228,27 @@ app.MapPost("/api/ytmd/queue", async (
         songRepeatCooldown.Cancel(reservation);
         throw;
     }
+
+    try
+    {
+        var queue = await youtubeMusicService.GetQueueAsync(cancellationToken);
+        var queuedItem = queue.Items.LastOrDefault(item =>
+            item.VideoId == request.VideoId.Trim());
+        songRepeatCooldown.ConfirmQueued(
+            reservation,
+            queuedItem?.InstanceId);
+    }
+    catch (HttpRequestException)
+    {
+        songRepeatCooldown.ConfirmQueued(reservation, null);
+    }
+    catch
+    {
+        songRepeatCooldown.ConfirmQueued(reservation, null);
+        throw;
+    }
+
+    return Results.NoContent();
 });
 
 app.MapGet("/api/ytmd/queue", async (
