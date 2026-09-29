@@ -18,6 +18,7 @@ builder.Services.AddSingleton<YoutubeMusicRealtimeProxy>();
 builder.Services.AddSingleton<SongRepeatCooldown>();
 builder.Services.AddHostedService<SongPlaybackMonitor>();
 builder.Services.AddSingleton<TwitchCommandProcessor>();
+builder.Services.AddSingleton<TwitchTokenStore>();
 builder.Services.AddSingleton<TwitchChatService>();
 builder.Services.AddHostedService(serviceProvider =>
     serviceProvider.GetRequiredService<TwitchChatService>());
@@ -148,18 +149,23 @@ app.MapGet("/api/twitch/callback", async (
     string? state,
     string? error,
     TwitchChatService twitchChatService,
+    ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
     if (!string.IsNullOrWhiteSpace(error))
     {
-        return Results.Redirect(
-            $"{twitchChatService.FrontendUri}?twitch=denied");
+        return TwitchCallbackPage(
+            "Twitch connection cancelled",
+            "Twitch did not grant access. You can close this window and try again when ready.",
+            success: false);
     }
 
     if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state))
     {
-        return Results.Redirect(
-            $"{twitchChatService.FrontendUri}?twitch=invalid");
+        return TwitchCallbackPage(
+            "Invalid Twitch response",
+            "The authorization response was incomplete. Close this window and start the connection again.",
+            success: false);
     }
 
     try
@@ -169,20 +175,28 @@ app.MapGet("/api/twitch/callback", async (
             state,
             cancellationToken);
 
-        return Results.Redirect(
-            $"{twitchChatService.FrontendUri}?twitch=connected");
+        return TwitchCallbackPage(
+            "Twitch connected",
+            "Authorization was encrypted and saved locally. The controller will reconnect automatically after future restarts.",
+            success: true);
     }
-    catch (Exception ex)
-        when (ex is HttpRequestException or InvalidOperationException)
+    catch (Exception ex) when (ex is not OperationCanceledException)
     {
-        return Results.Redirect(
-            $"{twitchChatService.FrontendUri}?twitch=failed");
+        loggerFactory
+            .CreateLogger("TwitchAuthorization")
+            .LogError(ex, "Unable to complete Twitch authorization.");
+
+        return TwitchCallbackPage(
+            "Twitch connection failed",
+            "The controller could not complete authorization. Check its logs, then close this window and try again.",
+            success: false);
     }
 });
 
-app.MapPost("/api/twitch/disconnect", (TwitchChatService twitchChatService) =>
+app.MapPost("/api/twitch/disconnect", async (
+    TwitchChatService twitchChatService) =>
 {
-    twitchChatService.Disconnect();
+    await twitchChatService.DisconnectAsync();
     return Results.NoContent();
 });
 
@@ -393,3 +407,38 @@ app.MapPost("/api/ytmd/previous", async (
 });
 
 app.Run();
+
+static IResult TwitchCallbackPage(
+    string title,
+    string message,
+    bool success)
+{
+    var accent = success ? "#4ade80" : "#fb7185";
+    var html = $$"""
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>{{title}}</title>
+          <style>
+            :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+            body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111827; color: #f9fafb; }
+            main { width: min(34rem, calc(100% - 3rem)); padding: 2rem; border: 1px solid #374151; border-radius: 1rem; background: #1f2937; box-shadow: 0 1rem 3rem #0006; }
+            h1 { margin-top: 0; color: {{accent}}; }
+            p { line-height: 1.6; color: #d1d5db; }
+            button { margin-top: 1rem; padding: .7rem 1rem; border: 0; border-radius: .6rem; font: inherit; cursor: pointer; }
+          </style>
+        </head>
+        <body>
+          <main>
+            <h1>{{title}}</h1>
+            <p>{{message}}</p>
+            <button type="button" onclick="window.close()">Close window</button>
+          </main>
+        </body>
+        </html>
+        """;
+
+    return Results.Content(html, "text/html; charset=utf-8");
+}

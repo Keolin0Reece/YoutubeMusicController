@@ -1,6 +1,8 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.WebSockets;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -23,11 +25,11 @@ public sealed class TwitchChatService : BackgroundService
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly TwitchCommandProcessor _commandProcessor;
+    private readonly TwitchTokenStore _tokenStore;
     private readonly ILogger<TwitchChatService> _logger;
-    private readonly string? _clientId;
-    private readonly string? _clientSecret;
+    private string? _clientId;
+    private string? _clientSecret;
     private readonly string _redirectUri;
-    private readonly string _frontendUri;
     private readonly object _gate = new();
     private readonly List<TwitchChatMessage> _recentMessages = [];
 
@@ -42,25 +44,23 @@ public sealed class TwitchChatService : BackgroundService
     public TwitchChatService(
         IHttpClientFactory httpClientFactory,
         TwitchCommandProcessor commandProcessor,
+        TwitchTokenStore tokenStore,
         IConfiguration configuration,
         ILogger<TwitchChatService> logger)
     {
         _httpClientFactory = httpClientFactory;
         _commandProcessor = commandProcessor;
+        _tokenStore = tokenStore;
         _logger = logger;
         _clientId = configuration["Twitch:ClientId"];
         _clientSecret = configuration["Twitch:ClientSecret"];
         _redirectUri = configuration["Twitch:RedirectUri"]
             ?? "http://localhost:5161/api/twitch/callback";
-        _frontendUri = configuration["Twitch:FrontendUri"]
-            ?? "http://localhost:5173";
     }
 
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(_clientId) &&
         !string.IsNullOrWhiteSpace(_clientSecret);
-
-    public string FrontendUri => _frontendUri;
 
     public TwitchConnectionStatus GetStatus()
     {
@@ -151,30 +151,16 @@ public sealed class TwitchChatService : BackgroundService
             ?? throw new InvalidOperationException(
                 "Twitch returned an empty token response.");
 
-        var identity = await ValidateTokenAsync(
-            token.AccessToken,
+        var authorization = await CreateAuthorizationAsync(
+            token,
+            fallbackRefreshToken: null,
             cancellationToken);
 
-        var missingScopes = RequiredScopes
-            .Except(identity.Scopes, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (missingScopes.Count > 0)
-        {
-            throw new InvalidOperationException(
-                $"Twitch did not grant the required scopes: {string.Join(", ", missingScopes)}.");
-        }
-
-        SetAuthorization(new TwitchAuthorization(
-            token.AccessToken,
-            token.RefreshToken,
-            DateTimeOffset.UtcNow.AddSeconds(token.ExpiresIn),
-            identity.UserId,
-            identity.Login,
-            identity.Login));
+        await SaveAuthorizationAsync(authorization, cancellationToken);
+        SetAuthorization(authorization);
     }
 
-    public void Disconnect()
+    public async Task DisconnectAsync()
     {
         lock (_gate)
         {
@@ -184,10 +170,14 @@ public sealed class TwitchChatService : BackgroundService
             _connectionError = null;
             RotateAuthorizationChangedToken();
         }
+
+        await SaveCredentialsWithoutAuthorizationAsync();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await RestoreAuthorizationAsync(stoppingToken);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             TwitchAuthorization? authorization;
@@ -207,10 +197,33 @@ public sealed class TwitchChatService : BackgroundService
                 continue;
             }
 
+            var refreshAfter = authorization.ExpiresAt -
+                DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5);
+
+            if (refreshAfter <= TimeSpan.Zero)
+            {
+                var refreshed = await TryRefreshAuthorizationAsync(
+                    authorization,
+                    stoppingToken);
+
+                if (!refreshed)
+                {
+                    await Task.Delay(
+                        TimeSpan.FromSeconds(30),
+                        stoppingToken);
+                }
+
+                continue;
+            }
+
+            using var refreshCancellation = new CancellationTokenSource(
+                refreshAfter);
+
             using var connectionCancellation =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     authorizationToken,
-                    stoppingToken);
+                    stoppingToken,
+                    refreshCancellation.Token);
 
             try
             {
@@ -222,7 +235,31 @@ public sealed class TwitchChatService : BackgroundService
             catch (OperationCanceledException)
                 when (connectionCancellation.IsCancellationRequested)
             {
-                // Authorization changed, the user disconnected, or the app stopped.
+                // Authorization changed, refresh is due, the user disconnected,
+                // or the app stopped.
+            }
+            catch (TwitchAuthorizationRevokedException ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Twitch revoked the chat subscription. Browser authorization is required again.");
+                await ClearAuthorizationAsync(
+                    "Authorization required",
+                    "Twitch revoked chat access. Connect Twitch again.");
+            }
+            catch (HttpRequestException ex)
+                when (ex.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                var refreshed = await TryRefreshAuthorizationAsync(
+                    authorization,
+                    stoppingToken);
+
+                if (!refreshed)
+                {
+                    await Task.Delay(
+                        TimeSpan.FromSeconds(30),
+                        stoppingToken);
+                }
             }
             catch (Exception ex)
             {
@@ -245,6 +282,295 @@ public sealed class TwitchChatService : BackgroundService
                 }
             }
         }
+    }
+
+    private async Task RestoreAuthorizationAsync(
+        CancellationToken cancellationToken)
+    {
+        TwitchStoredState? storedState;
+
+        try
+        {
+            storedState = await _tokenStore.LoadAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or
+                                   UnauthorizedAccessException or
+                                   SecurityException or
+                                   CryptographicException or
+                                   JsonException)
+        {
+            _logger.LogError(
+                ex,
+                "Unable to read the encrypted Twitch authorization store at {Path}.",
+                _tokenStore.FilePath);
+            SetConnectionState(
+                "Authorization unavailable",
+                false,
+                "The encrypted Twitch authorization could not be read. Connect Twitch again.");
+            return;
+        }
+
+        if (storedState is null)
+        {
+            return;
+        }
+
+        _clientId ??= storedState.ClientId;
+        _clientSecret ??= storedState.ClientSecret;
+
+        if (!IsConfigured || storedState.Authorization is null)
+        {
+            return;
+        }
+
+        var stored = storedState.Authorization;
+
+        var storedAuthorization = new TwitchAuthorization(
+            stored.AccessToken,
+            stored.RefreshToken,
+            stored.ExpiresAt,
+            stored.UserId,
+            stored.Login,
+            stored.DisplayName);
+
+        try
+        {
+            var identity = await ValidateTokenAsync(
+                stored.AccessToken,
+                cancellationToken);
+            ValidateIdentity(identity);
+
+            var authorization = storedAuthorization with
+            {
+                ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(
+                    identity.ExpiresIn),
+                UserId = identity.UserId,
+                Login = identity.Login,
+                DisplayName = identity.Login
+            };
+
+            await SaveAuthorizationAsync(authorization, cancellationToken);
+            SetAuthorization(authorization);
+            _logger.LogInformation(
+                "Restored Twitch authorization for {Login}.",
+                authorization.Login);
+        }
+        catch (HttpRequestException ex)
+            when (ex.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            await TryRefreshAuthorizationAsync(
+                storedAuthorization,
+                cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "The saved Twitch authorization is no longer valid. Browser authorization is required again.");
+            await ClearAuthorizationAsync(
+                "Authorization required",
+                "The saved Twitch authorization is no longer valid. Connect Twitch again.");
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Twitch authorization could not be validated during startup; it will be retried.");
+            SetAuthorization(storedAuthorization);
+        }
+    }
+
+    private async Task<bool> TryRefreshAuthorizationAsync(
+        TwitchAuthorization authorization,
+        CancellationToken cancellationToken)
+    {
+        SetConnectionState("Refreshing authorization", false, null);
+
+        try
+        {
+            var token = await RequestRefreshTokenAsync(
+                authorization.RefreshToken,
+                cancellationToken);
+            var refreshedAuthorization = await CreateAuthorizationAsync(
+                token,
+                authorization.RefreshToken,
+                cancellationToken);
+
+            await SaveAuthorizationAsync(
+                refreshedAuthorization,
+                cancellationToken);
+            SetAuthorization(refreshedAuthorization);
+            _logger.LogInformation(
+                "Refreshed Twitch authorization for {Login}.",
+                refreshedAuthorization.Login);
+            return true;
+        }
+        catch (HttpRequestException ex)
+            when (ex.StatusCode is HttpStatusCode.BadRequest or
+                  HttpStatusCode.Unauthorized)
+        {
+            _logger.LogWarning(
+                ex,
+                "Twitch rejected the saved refresh token. Browser authorization is required again.");
+            await ClearAuthorizationAsync(
+                "Authorization required",
+                "Twitch authorization expired or was revoked. Connect Twitch again.");
+            return true;
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "The saved Twitch authorization cannot be refreshed. Browser authorization is required again.");
+            await ClearAuthorizationAsync(
+                "Authorization required",
+                "The saved Twitch authorization cannot be refreshed. Connect Twitch again.");
+            return true;
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Unable to refresh Twitch authorization; retrying shortly.");
+            SetConnectionState(
+                "Waiting to refresh authorization",
+                false,
+                "Unable to refresh Twitch authorization. Retrying automatically.");
+            return false;
+        }
+    }
+
+    private async Task<TokenResponse> RequestRefreshTokenAsync(
+        string refreshToken,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            throw new InvalidOperationException(
+                "The saved Twitch authorization has no refresh token.");
+        }
+
+        var client = _httpClientFactory.CreateClient();
+        using var response = await client.PostAsync(
+            "https://id.twitch.tv/oauth2/token",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = _clientId!,
+                ["client_secret"] = _clientSecret!,
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = refreshToken
+            }),
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        return await response.Content.ReadFromJsonAsync<TokenResponse>(
+            cancellationToken: cancellationToken)
+            ?? throw new InvalidOperationException(
+                "Twitch returned an empty refresh response.");
+    }
+
+    private async Task<TwitchAuthorization> CreateAuthorizationAsync(
+        TokenResponse token,
+        string? fallbackRefreshToken,
+        CancellationToken cancellationToken)
+    {
+        var identity = await ValidateTokenAsync(
+            token.AccessToken,
+            cancellationToken);
+        ValidateIdentity(identity);
+        var refreshToken = string.IsNullOrWhiteSpace(token.RefreshToken)
+            ? fallbackRefreshToken
+            : token.RefreshToken;
+
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            throw new InvalidOperationException(
+                "Twitch did not return a refresh token.");
+        }
+
+        return new TwitchAuthorization(
+            token.AccessToken,
+            refreshToken,
+            DateTimeOffset.UtcNow.AddSeconds(
+                identity.ExpiresIn > 0
+                    ? identity.ExpiresIn
+                    : token.ExpiresIn),
+            identity.UserId,
+            identity.Login,
+            identity.Login);
+    }
+
+    private void ValidateIdentity(ValidatedToken identity)
+    {
+        if (!string.Equals(
+                identity.ClientId,
+                _clientId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The Twitch token belongs to a different application.");
+        }
+
+        var missingScopes = RequiredScopes
+            .Except(identity.Scopes, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (missingScopes.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Twitch did not grant the required scopes: {string.Join(", ", missingScopes)}.");
+        }
+    }
+
+    private Task SaveAuthorizationAsync(
+        TwitchAuthorization authorization,
+        CancellationToken cancellationToken) =>
+        _tokenStore.SaveAsync(
+            new TwitchStoredState(
+                _clientId!,
+                _clientSecret!,
+                new TwitchStoredAuthorization(
+                    authorization.AccessToken,
+                    authorization.RefreshToken,
+                    authorization.ExpiresAt,
+                    authorization.UserId,
+                    authorization.Login,
+                    authorization.DisplayName)),
+            cancellationToken);
+
+    private Task SaveCredentialsWithoutAuthorizationAsync() =>
+        IsConfigured
+            ? _tokenStore.SaveAsync(new TwitchStoredState(
+                _clientId!,
+                _clientSecret!,
+                Authorization: null))
+            : _tokenStore.DeleteAsync();
+
+    private async Task ClearAuthorizationAsync(
+        string state,
+        string? error)
+    {
+        lock (_gate)
+        {
+            _authorization = null;
+            _connected = false;
+            _state = state;
+            _connectionError = error;
+            RotateAuthorizationChangedToken();
+        }
+
+        await SaveCredentialsWithoutAuthorizationAsync();
     }
 
     private async Task RunEventSubConnectionAsync(
@@ -343,7 +669,7 @@ public sealed class TwitchChatService : BackgroundService
                             : new Uri(reconnectUrl);
                     }
                 case "revocation":
-                    throw new InvalidOperationException(
+                    throw new TwitchAuthorizationRevokedException(
                         "Twitch revoked the chat subscription.");
             }
         }
@@ -449,6 +775,11 @@ public sealed class TwitchChatService : BackgroundService
                     response,
                     authorization,
                     cancellationToken);
+            }
+            catch (HttpRequestException ex)
+                when (ex.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                throw;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -644,12 +975,14 @@ public sealed class TwitchChatService : BackgroundService
 
     private sealed record TokenResponse(
         [property: JsonPropertyName("access_token")] string AccessToken,
-        [property: JsonPropertyName("refresh_token")] string RefreshToken,
+        [property: JsonPropertyName("refresh_token")] string? RefreshToken,
         [property: JsonPropertyName("expires_in")] int ExpiresIn);
 
     private sealed record ValidatedToken(
+        [property: JsonPropertyName("client_id")] string ClientId,
         [property: JsonPropertyName("user_id")] string UserId,
         [property: JsonPropertyName("login")] string Login,
+        [property: JsonPropertyName("expires_in")] int ExpiresIn,
         [property: JsonPropertyName("scopes")] IReadOnlyList<string> Scopes);
 
     private sealed record SendChatMessageResponse(
@@ -663,4 +996,7 @@ public sealed class TwitchChatService : BackgroundService
 
     private sealed record SendChatMessageDropReason(
         [property: JsonPropertyName("message")] string Message);
+
+    private sealed class TwitchAuthorizationRevokedException(string message)
+        : Exception(message);
 }
