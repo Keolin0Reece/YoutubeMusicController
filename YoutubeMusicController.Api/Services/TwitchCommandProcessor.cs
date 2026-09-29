@@ -7,6 +7,7 @@ namespace YoutubeMusicController.Api.Services;
 public sealed partial class TwitchCommandProcessor
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly SongRepeatCooldown _songRepeatCooldown;
     private readonly ILogger<TwitchCommandProcessor> _logger;
     private readonly SemaphoreSlim _commandGate = new(1, 1);
     private readonly ConcurrentDictionary<string, DateTimeOffset>
@@ -19,10 +20,12 @@ public sealed partial class TwitchCommandProcessor
 
     public TwitchCommandProcessor(
         IServiceScopeFactory scopeFactory,
+        SongRepeatCooldown songRepeatCooldown,
         IConfiguration configuration,
         ILogger<TwitchCommandProcessor> logger)
     {
         _scopeFactory = scopeFactory;
+        _songRepeatCooldown = songRepeatCooldown;
         _logger = logger;
         _songRequestsEnabled = configuration.GetValue(
             "Twitch:Commands:SongRequestsEnabled",
@@ -163,23 +166,31 @@ public sealed partial class TwitchCommandProcessor
             return $"@{chatMessage.DisplayName} I couldn't find a playable song for “{Sanitize(query)}”.";
         }
 
-        var queueBefore = await youtubeMusicService.GetQueueAsync(
-            cancellationToken);
-
-        if (queueBefore.Items.Any(item => item.VideoId == result.VideoId))
+        if (!_songRepeatCooldown.TryReserve(
+                result.VideoId,
+                out var reservation,
+                out var repeatRemaining))
         {
-            return $"@{chatMessage.DisplayName} “{Sanitize(result.Title)}” is already in the queue.";
+            return $"@{chatMessage.DisplayName} “{Sanitize(result.Title)}” can be requested again in {SongRepeatCooldown.FormatRemaining(repeatRemaining)}.";
         }
 
-        await youtubeMusicService.AddToQueueAsync(
-            result.VideoId,
-            cancellationToken);
+        try
+        {
+            await youtubeMusicService.AddToQueueAsync(
+                result.VideoId,
+                cancellationToken);
+        }
+        catch
+        {
+            _songRepeatCooldown.Cancel(reservation);
+            throw;
+        }
 
         _userSongCooldowns[chatMessage.UserId] = now;
 
         var queueAfter = await youtubeMusicService.GetQueueAsync(
             cancellationToken);
-        var queuedItem = queueAfter.Items.FirstOrDefault(item =>
+        var queuedItem = queueAfter.Items.LastOrDefault(item =>
             item.VideoId == result.VideoId);
         var artist = result.Artists.FirstOrDefault() ?? "Unknown artist";
         var position = queuedItem is null

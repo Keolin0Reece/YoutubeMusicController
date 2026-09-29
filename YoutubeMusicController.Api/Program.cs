@@ -15,6 +15,7 @@ builder.Services.AddHttpClient("Ytmd", client =>
 
 builder.Services.AddScoped<YoutubeMusicService>();
 builder.Services.AddSingleton<YoutubeMusicRealtimeProxy>();
+builder.Services.AddSingleton<SongRepeatCooldown>();
 builder.Services.AddSingleton<TwitchCommandProcessor>();
 builder.Services.AddSingleton<TwitchChatService>();
 builder.Services.AddHostedService(serviceProvider =>
@@ -186,6 +187,7 @@ app.MapPost("/api/twitch/disconnect", (TwitchChatService twitchChatService) =>
 
 app.MapPost("/api/ytmd/queue", async (
     AddToQueueRequest request,
+    SongRepeatCooldown songRepeatCooldown,
     YoutubeMusicService youtubeMusicService,
     CancellationToken cancellationToken) =>
 {
@@ -195,6 +197,16 @@ app.MapPost("/api/ytmd/queue", async (
         {
             [nameof(request.VideoId)] = ["A video ID is required."]
         });
+    }
+
+    if (!songRepeatCooldown.TryReserve(
+            request.VideoId.Trim(),
+            out var reservation,
+            out var repeatRemaining))
+    {
+        return Results.Problem(
+            detail: $"This song can be queued again in {SongRepeatCooldown.FormatRemaining(repeatRemaining)}.",
+            statusCode: StatusCodes.Status409Conflict);
     }
 
     try
@@ -207,9 +219,15 @@ app.MapPost("/api/ytmd/queue", async (
     }
     catch (HttpRequestException ex)
     {
+        songRepeatCooldown.Cancel(reservation);
         return Results.Problem(
             detail: ex.Message,
             statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch
+    {
+        songRepeatCooldown.Cancel(reservation);
+        throw;
     }
 });
 

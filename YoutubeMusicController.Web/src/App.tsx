@@ -106,9 +106,6 @@ function App() {
   const [queueingVideoId, setQueueingVideoId] = useState<
     string | null
   >(null);
-  const [queuedVideoIds, setQueuedVideoIds] = useState<Set<string>>(
-    () => new Set()
-  );
   const [queueNotice, setQueueNotice] = useState<QueueNotice | null>(
     null
   );
@@ -339,11 +336,6 @@ function App() {
         throw new Error(detail);
       }
 
-      setQueuedVideoIds((current) => {
-        const updated = new Set(current);
-        updated.add(result.videoId);
-        return updated;
-      });
       setQueueNotice({
         type: "success",
         message: `Added “${result.title}” to the end of the queue.`,
@@ -965,16 +957,13 @@ function App() {
                         className="queue-button"
                         onClick={() => addToQueue(result)}
                         disabled={
-                          queueingVideoId !== null ||
-                          queuedVideoIds.has(result.videoId)
+                          queueingVideoId !== null
                         }
                         aria-label={`Add ${result.title} to queue`}
                       >
-                        {queuedVideoIds.has(result.videoId)
-                          ? "Added"
-                          : queueingVideoId === result.videoId
-                            ? "Adding…"
-                            : "+ Queue"}
+                        {queueingVideoId === result.videoId
+                          ? "Adding…"
+                          : "+ Queue"}
                       </button>
                     </div>
                   </li>
