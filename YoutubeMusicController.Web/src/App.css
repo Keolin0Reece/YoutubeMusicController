@@ -255,6 +255,194 @@ h1 {
   text-align: center;
 }
 
+/* Twitch */
+
+.twitch-section {
+  margin-top: 28px;
+  padding: 18px;
+  border: 1px solid rgba(145, 70, 255, 0.28);
+  border-radius: 16px;
+  background:
+    linear-gradient(
+      135deg,
+      rgba(145, 70, 255, 0.08),
+      rgba(18, 18, 18, 0.96) 45%
+    );
+  text-align: left;
+}
+
+.twitch-heading,
+.twitch-heading > div,
+.twitch-actions,
+.twitch-messages-title {
+  display: flex;
+  align-items: center;
+}
+
+.twitch-heading,
+.twitch-actions,
+.twitch-messages-title {
+  justify-content: space-between;
+}
+
+.twitch-heading {
+  gap: 20px;
+}
+
+.twitch-heading > div {
+  min-width: 0;
+  gap: 14px;
+}
+
+.twitch-icon {
+  display: flex;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(145, 70, 255, 0.2);
+  color: #bf94ff;
+  font-size: 18px;
+}
+
+.twitch-heading strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 13px;
+}
+
+.twitch-heading p {
+  margin: 0;
+  color: #81778e;
+  font-size: 12px;
+}
+
+.twitch-state {
+  padding: 5px 8px;
+  border: 1px solid #3a3343;
+  border-radius: 6px;
+  color: #92899c;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.twitch-state.connected {
+  border-color: rgba(94, 230, 118, 0.25);
+  color: #b8f5c0;
+}
+
+.twitch-setup,
+.twitch-error {
+  margin-top: 14px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.twitch-setup {
+  border: 1px solid rgba(145, 70, 255, 0.25);
+  background: rgba(145, 70, 255, 0.07);
+  color: #bba6d7;
+}
+
+.twitch-error {
+  border: 1px solid rgba(210, 91, 91, 0.28);
+  background: rgba(158, 49, 49, 0.08);
+  color: #e0a5a5;
+}
+
+.twitch-actions {
+  gap: 16px;
+  margin-top: 16px;
+  color: #837b8c;
+  font-size: 11px;
+}
+
+.twitch-actions button {
+  min-height: 34px;
+  padding: 0 13px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.twitch-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.twitch-connect {
+  border: 0;
+  background: #9146ff;
+  color: #fff;
+}
+
+.twitch-disconnect {
+  border: 1px solid #3a3343;
+  background: #1b181f;
+  color: #b2a8be;
+}
+
+.twitch-messages {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(145, 70, 255, 0.14);
+}
+
+.twitch-messages-title {
+  color: #756c7f;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.twitch-empty {
+  margin: 12px 0 0;
+  color: #625b6a;
+  font-size: 11px;
+  text-align: center;
+}
+
+.twitch-messages ul {
+  max-height: 180px;
+  margin: 10px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.twitch-messages li {
+  display: grid;
+  grid-template-columns: 48px minmax(80px, auto) minmax(0, 1fr);
+  gap: 9px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+}
+
+.twitch-messages time {
+  color: #5f5867;
+}
+
+.twitch-messages strong {
+  overflow: hidden;
+  color: #bf94ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.twitch-messages li > span {
+  overflow-wrap: anywhere;
+  color: #aaa2b2;
+}
+
 /* Search */
 
 .search-section {
@@ -823,6 +1011,32 @@ h1 {
 
   .search-heading {
     align-items: flex-start;
+  }
+
+  .twitch-heading,
+  .twitch-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .twitch-heading p {
+    max-width: 220px;
+  }
+
+  .twitch-state {
+    margin-left: 50px;
+  }
+
+  .twitch-actions button {
+    width: 100%;
+  }
+
+  .twitch-messages li {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .twitch-messages li > span {
+    grid-column: 2;
   }
 
   .search-heading p {

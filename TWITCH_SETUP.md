@@ -1,0 +1,47 @@
+# Twitch chat connection setup
+
+The controller receives Twitch chat through an EventSub WebSocket. It does not
+need a public URL, webhook, cloud service, or port forwarding.
+
+## 1. Register a Twitch application
+
+Open the Twitch Developer Console and create an application with this OAuth
+redirect URL:
+
+```text
+http://localhost:5161/api/twitch/callback
+```
+
+Choose **Chat Bot** as the application category.
+
+## 2. Store the credentials locally
+
+From the repository root, run these commands with the values from Twitch:
+
+```powershell
+dotnet user-secrets set "Twitch:ClientId" "YOUR_CLIENT_ID" --project .\YoutubeMusicController.Api
+dotnet user-secrets set "Twitch:ClientSecret" "YOUR_CLIENT_SECRET" --project .\YoutubeMusicController.Api
+```
+
+User-secrets are stored outside the repository. Never add the client secret or
+OAuth tokens to `appsettings.json`, a committed `.env` file, or source code.
+
+## 3. Run and connect
+
+Run the API and frontend normally, then select **Connect Twitch** in the local
+controller. Twitch will request permission to read and write chat using the
+signed-in broadcaster account.
+
+Once connected, the controller recognizes these Twitch chat commands:
+
+```text
+!song <title or artist>
+!sr <title or artist>
+!nowplaying
+!np
+!queue
+```
+
+Song requests are searched, deduplicated against the visible YTMD queue, and
+added to the end of the queue. Cooldowns and maximum query length can be changed
+under `Twitch:Commands` in `appsettings.json`.

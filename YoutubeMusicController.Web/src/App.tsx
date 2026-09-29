@@ -72,6 +72,23 @@ interface RealtimeMessage {
   position?: number;
 }
 
+interface TwitchConnectionStatus {
+  configured: boolean;
+  authorized: boolean;
+  connected: boolean;
+  state: string;
+  accountName: string | null;
+  error: string | null;
+}
+
+interface TwitchChatMessage {
+  id: string;
+  username: string;
+  displayName: string;
+  message: string;
+  receivedAt: string;
+}
+
 function App() {
   const [connected, setConnected] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(null);
@@ -105,6 +122,12 @@ function App() {
     useState<QueueNotice | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
+  const [twitchStatus, setTwitchStatus] =
+    useState<TwitchConnectionStatus | null>(null);
+  const [twitchMessages, setTwitchMessages] = useState<
+    TwitchChatMessage[]
+  >([]);
+  const [twitchLoading, setTwitchLoading] = useState(false);
 
   const fetchNowPlaying = async () => {
     try {
@@ -432,6 +455,55 @@ function App() {
     }
   };
 
+  const fetchTwitchState = async () => {
+    try {
+      const [statusResponse, messagesResponse] = await Promise.all([
+        fetch(`${API_URL}/api/twitch/status`),
+        fetch(`${API_URL}/api/twitch/messages`),
+      ]);
+
+      if (!statusResponse.ok || !messagesResponse.ok) {
+        throw new Error("Unable to load Twitch state.");
+      }
+
+      const [status, messages]: [
+        TwitchConnectionStatus,
+        TwitchChatMessage[],
+      ] = await Promise.all([
+        statusResponse.json(),
+        messagesResponse.json(),
+      ]);
+
+      setTwitchStatus(status);
+      setTwitchMessages(messages);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const connectTwitch = () => {
+    window.location.assign(`${API_URL}/api/twitch/connect`);
+  };
+
+  const disconnectTwitch = async () => {
+    try {
+      setTwitchLoading(true);
+      const response = await fetch(`${API_URL}/api/twitch/disconnect`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      await fetchTwitchState();
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setTwitchLoading(false);
+    }
+  };
+
   useEffect(() => {
     const initialRefresh = setTimeout(() => {
       fetchNowPlaying();
@@ -442,6 +514,16 @@ function App() {
       fetchNowPlaying();
       fetchQueue();
     }, 30000);
+
+    return () => {
+      clearTimeout(initialRefresh);
+      clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    const initialRefresh = setTimeout(fetchTwitchState, 0);
+    const interval = setInterval(fetchTwitchState, 3000);
 
     return () => {
       clearTimeout(initialRefresh);
@@ -684,6 +766,100 @@ function App() {
         <div className="status-message">
           {message}
         </div>
+
+        <section className="twitch-section">
+          <div className="twitch-heading">
+            <div>
+              <span className="twitch-icon" aria-hidden="true">
+                ◈
+              </span>
+
+              <div>
+                <strong>Twitch Chat</strong>
+                <p>
+                  Try !song, !sr, !nowplaying, or !queue in chat.
+                </p>
+              </div>
+            </div>
+
+            <span
+              className={`twitch-state ${
+                twitchStatus?.connected ? "connected" : ""
+              }`}
+            >
+              {twitchStatus?.state ?? "Checking…"}
+            </span>
+          </div>
+
+          {twitchStatus && !twitchStatus.configured && (
+            <div className="twitch-setup">
+              Add the Twitch client ID and secret to local .NET
+              user-secrets before connecting.
+            </div>
+          )}
+
+          {twitchStatus?.error && (
+            <div className="twitch-error" role="alert">
+              {twitchStatus.error}
+            </div>
+          )}
+
+          <div className="twitch-actions">
+            <div>
+              {twitchStatus?.accountName
+                ? `Signed in as ${twitchStatus.accountName}`
+                : "No Twitch account connected"}
+            </div>
+
+            {twitchStatus?.authorized ? (
+              <button
+                type="button"
+                className="twitch-disconnect"
+                onClick={disconnectTwitch}
+                disabled={twitchLoading}
+              >
+                {twitchLoading ? "Disconnecting…" : "Disconnect"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="twitch-connect"
+                onClick={connectTwitch}
+                disabled={!twitchStatus?.configured}
+              >
+                Connect Twitch
+              </button>
+            )}
+          </div>
+
+          <div className="twitch-messages" aria-live="polite">
+            <div className="twitch-messages-title">
+              <span>Recent chat messages</span>
+              <span>{twitchMessages.length}/20</span>
+            </div>
+
+            {twitchMessages.length === 0 ? (
+              <p className="twitch-empty">
+                Connect Twitch, then send a message in your channel.
+              </p>
+            ) : (
+              <ul>
+                {twitchMessages.map((chatMessage) => (
+                  <li key={chatMessage.id}>
+                    <time>
+                      {new Date(chatMessage.receivedAt).toLocaleTimeString(
+                        [],
+                        { hour: "2-digit", minute: "2-digit" }
+                      )}
+                    </time>
+                    <strong>{chatMessage.displayName}</strong>
+                    <span>{chatMessage.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </section>
 
         <section className="search-section">
           <div className="search-heading">

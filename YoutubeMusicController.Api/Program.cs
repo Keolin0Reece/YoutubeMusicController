@@ -15,6 +15,10 @@ builder.Services.AddHttpClient("Ytmd", client =>
 
 builder.Services.AddScoped<YoutubeMusicService>();
 builder.Services.AddSingleton<YoutubeMusicRealtimeProxy>();
+builder.Services.AddSingleton<TwitchCommandProcessor>();
+builder.Services.AddSingleton<TwitchChatService>();
+builder.Services.AddHostedService(serviceProvider =>
+    serviceProvider.GetRequiredService<TwitchChatService>());
 
 builder.Services.AddCors(options =>
 {
@@ -114,6 +118,70 @@ app.MapGet("/api/ytmd/now-playing", async (
             detail: ex.Message,
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
+});
+
+app.MapGet("/api/twitch/status", (TwitchChatService twitchChatService) =>
+    Results.Ok(twitchChatService.GetStatus()));
+
+app.MapGet("/api/twitch/messages", (TwitchChatService twitchChatService) =>
+    Results.Ok(twitchChatService.GetRecentMessages()));
+
+app.MapGet("/api/twitch/connect", (TwitchChatService twitchChatService) =>
+{
+    try
+    {
+        return Results.Redirect(
+            twitchChatService.CreateAuthorizationUri().AbsoluteUri);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(
+            detail: ex.Message,
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
+app.MapGet("/api/twitch/callback", async (
+    string? code,
+    string? state,
+    string? error,
+    TwitchChatService twitchChatService,
+    CancellationToken cancellationToken) =>
+{
+    if (!string.IsNullOrWhiteSpace(error))
+    {
+        return Results.Redirect(
+            $"{twitchChatService.FrontendUri}?twitch=denied");
+    }
+
+    if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state))
+    {
+        return Results.Redirect(
+            $"{twitchChatService.FrontendUri}?twitch=invalid");
+    }
+
+    try
+    {
+        await twitchChatService.CompleteAuthorizationAsync(
+            code,
+            state,
+            cancellationToken);
+
+        return Results.Redirect(
+            $"{twitchChatService.FrontendUri}?twitch=connected");
+    }
+    catch (Exception ex)
+        when (ex is HttpRequestException or InvalidOperationException)
+    {
+        return Results.Redirect(
+            $"{twitchChatService.FrontendUri}?twitch=failed");
+    }
+});
+
+app.MapPost("/api/twitch/disconnect", (TwitchChatService twitchChatService) =>
+{
+    twitchChatService.Disconnect();
+    return Results.NoContent();
 });
 
 app.MapPost("/api/ytmd/queue", async (
