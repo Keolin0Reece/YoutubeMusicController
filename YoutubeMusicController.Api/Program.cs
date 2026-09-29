@@ -34,6 +34,11 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services.AddWindowsService(options =>
+{
+    options.ServiceName = "YouTube Music Controller";
+});
+
 var app = builder.Build();
 
 app.UseCors("Frontend");
@@ -406,7 +411,17 @@ app.MapPost("/api/ytmd/previous", async (
     }
 });
 
-app.Run();
+try
+{
+    await app.RunAsync();
+}
+catch (OperationCanceledException)
+    when (Microsoft.Extensions.Hosting.WindowsServices
+        .WindowsServiceHelpers.IsWindowsService())
+{
+    // Windows Service shutdown can cancel the host stop token after the
+    // service has already stopped successfully.
+}
 
 static IResult TwitchCallbackPage(
     string title,
