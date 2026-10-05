@@ -63,7 +63,6 @@ Once connected, the controller recognizes these Twitch chat commands:
 
 ```text
 !song <title or artist>
-!sr <title or artist>
 !nowplaying
 !np
 !queue

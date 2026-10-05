@@ -60,7 +60,14 @@ public sealed partial class TwitchCommandProcessor
         }
 
         var command = match.Groups["command"].Value.ToLowerInvariant();
+        var isKnownCommand = command is "song" or
+            "nowplaying" or "np" or "queue";
         var arguments = match.Groups["arguments"].Value.Trim();
+
+        if (!isKnownCommand)
+        {
+            return null;
+        }
 
         await _commandGate.WaitAsync(cancellationToken);
 
@@ -72,7 +79,7 @@ public sealed partial class TwitchCommandProcessor
 
             return command switch
             {
-                "song" or "sr" => await HandleSongRequestAsync(
+                "song" => await HandleSongRequestAsync(
                     chatMessage,
                     arguments,
                     youtubeMusicService,

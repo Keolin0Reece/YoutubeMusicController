@@ -769,7 +769,7 @@ function App() {
               <div>
                 <strong>Twitch Chat</strong>
                 <p>
-                  Try !song, !sr, !nowplaying, or !queue in chat.
+                  Try !song, !nowplaying, or !queue in chat.
                 </p>
               </div>
             </div>
