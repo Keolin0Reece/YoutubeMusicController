@@ -2,10 +2,39 @@ import { useEffect, useState, type FormEvent } from "react";
 import "./App.css";
 
 const API_URL =
-  (import.meta.env.VITE_API_URL ?? "http://localhost:5161").replace(
+  (import.meta.env.VITE_API_URL ??
+    (window.location.port === "5161"
+      ? window.location.origin
+      : "http://localhost:5161")).replace(
     /\/$/,
     ""
   );
+const pageUrl = new URL(window.location.href);
+const suppliedApiKey = new URLSearchParams(
+  pageUrl.hash.startsWith("#") ? pageUrl.hash.slice(1) : pageUrl.hash
+).get("key");
+
+if (suppliedApiKey) {
+  sessionStorage.setItem("ymc-api-key", suppliedApiKey);
+  pageUrl.hash = "";
+  window.history.replaceState({}, "", pageUrl);
+}
+
+const API_KEY =
+  suppliedApiKey ??
+  sessionStorage.getItem("ymc-api-key") ??
+  import.meta.env.VITE_API_KEY ??
+  "";
+
+const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => {
+  const headers = new Headers(init.headers);
+
+  if (API_KEY) {
+    headers.set("X-Controller-Key", API_KEY);
+  }
+
+  return fetch(input, { ...init, headers });
+};
 
 interface NowPlaying {
   title: string | null;
@@ -128,7 +157,7 @@ function App() {
 
   const fetchNowPlaying = async () => {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/ytmd/now-playing`
       );
 
@@ -155,7 +184,7 @@ function App() {
 
       setQueueError(null);
 
-      const response = await fetch(`${API_URL}/api/ytmd/queue`);
+      const response = await apiFetch(`${API_URL}/api/ytmd/queue`);
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -183,7 +212,7 @@ function App() {
           : "Pausing..."
       );
 
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/ytmd/play-pause`,
         {
           method: "POST",
@@ -210,7 +239,7 @@ function App() {
       setLoading(true);
       setMessage("Skipping...");
 
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/ytmd/next`,
         {
           method: "POST",
@@ -237,7 +266,7 @@ function App() {
       setLoading(true);
       setMessage("Going back...");
 
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/ytmd/previous`,
         {
           method: "POST",
@@ -274,7 +303,7 @@ function App() {
       setQueueNotice(null);
       setHasSearched(true);
 
-      const response = await fetch(`${API_URL}/api/ytmd/search`, {
+      const response = await apiFetch(`${API_URL}/api/ytmd/search`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -315,7 +344,7 @@ function App() {
       setQueueingVideoId(result.videoId);
       setQueueNotice(null);
 
-      const response = await fetch(`${API_URL}/api/ytmd/queue`, {
+      const response = await apiFetch(`${API_URL}/api/ytmd/queue`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -360,7 +389,7 @@ function App() {
       setQueueMutation(`remove-${item.index}`);
       setQueueManagementNotice(null);
 
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/ytmd/queue/${item.index}`,
         { method: "DELETE" }
       );
@@ -390,7 +419,7 @@ function App() {
       setQueueMutation(`move-${item.index}`);
       setQueueManagementNotice(null);
 
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/api/ytmd/queue/${item.index}`,
         {
           method: "PATCH",
@@ -422,7 +451,7 @@ function App() {
       setQueueMutation("clear");
       setQueueManagementNotice(null);
 
-      const response = await fetch(`${API_URL}/api/ytmd/queue`, {
+      const response = await apiFetch(`${API_URL}/api/ytmd/queue`, {
         method: "DELETE",
       });
 
@@ -450,8 +479,8 @@ function App() {
   const fetchTwitchState = async () => {
     try {
       const [statusResponse, messagesResponse] = await Promise.all([
-        fetch(`${API_URL}/api/twitch/status`),
-        fetch(`${API_URL}/api/twitch/messages`),
+        apiFetch(`${API_URL}/api/twitch/status`),
+        apiFetch(`${API_URL}/api/twitch/messages`),
       ]);
 
       if (!statusResponse.ok || !messagesResponse.ok) {
@@ -473,14 +502,24 @@ function App() {
     }
   };
 
-  const connectTwitch = () => {
-    window.location.assign(`${API_URL}/api/twitch/connect`);
+  const connectTwitch = async () => {
+    const response = await apiFetch(
+      `${API_URL}/api/twitch/device-authorization`,
+      { method: "POST" }
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const result: { verificationUri: string } = await response.json();
+    window.location.assign(result.verificationUri);
   };
 
   const disconnectTwitch = async () => {
     try {
       setTwitchLoading(true);
-      const response = await fetch(`${API_URL}/api/twitch/disconnect`, {
+      const response = await apiFetch(`${API_URL}/api/twitch/disconnect`, {
         method: "POST",
       });
 
@@ -530,7 +569,7 @@ function App() {
     let stopped = false;
 
     const connect = () => {
-      const socketUrl = `${API_URL.replace(/^http/, "ws")}/api/ytmd/realtime`;
+      const socketUrl = `${API_URL.replace(/^http/, "ws")}/api/ytmd/realtime?key=${encodeURIComponent(API_KEY)}`;
       socket = new WebSocket(socketUrl);
 
       socket.onopen = () => {

@@ -13,10 +13,16 @@ public sealed class DiscordTokenStore
             "YoutubeMusicController.DiscordAuthorization.v1"));
 
     private readonly string _filePath;
+    private readonly string _legacyFilePath;
 
     public DiscordTokenStore(IConfiguration configuration)
     {
         _filePath = configuration["Discord:TokenStorePath"] ?? Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "YoutubeMusicController",
+            "discord-auth.dat");
+        _legacyFilePath = Path.Combine(
             Environment.GetFolderPath(
                 Environment.SpecialFolder.CommonApplicationData),
             "YoutubeMusicController",
@@ -26,22 +32,38 @@ public sealed class DiscordTokenStore
     public async Task<DiscordStoredState?> LoadAsync(
         CancellationToken cancellationToken = default)
     {
+        if (!File.Exists(_filePath) && File.Exists(_legacyFilePath))
+        {
+            var migrated = await ReadAsync(
+                _legacyFilePath,
+                DataProtectionScope.LocalMachine,
+                cancellationToken);
+            await SaveAsync(migrated, cancellationToken);
+            return migrated;
+        }
+
         if (!File.Exists(_filePath))
         {
             return null;
         }
 
-        var encrypted = await File.ReadAllBytesAsync(
+        return await ReadAsync(
             _filePath,
+            DataProtectionScope.CurrentUser,
             cancellationToken);
+    }
+
+    private static async Task<DiscordStoredState> ReadAsync(
+        string path,
+        DataProtectionScope scope,
+        CancellationToken cancellationToken)
+    {
+        var encrypted = await File.ReadAllBytesAsync(path, cancellationToken);
         byte[]? plaintext = null;
 
         try
         {
-            plaintext = ProtectedData.Unprotect(
-                encrypted,
-                Entropy,
-                DataProtectionScope.LocalMachine);
+            plaintext = ProtectedData.Unprotect(encrypted, Entropy, scope);
 
             return JsonSerializer.Deserialize<DiscordStoredState>(plaintext)
                 ?? throw new InvalidDataException(
@@ -78,7 +100,7 @@ public sealed class DiscordTokenStore
             encrypted = ProtectedData.Protect(
                 plaintext,
                 Entropy,
-                DataProtectionScope.LocalMachine);
+                DataProtectionScope.CurrentUser);
             await File.WriteAllBytesAsync(
                 temporaryPath,
                 encrypted,
@@ -101,6 +123,16 @@ public sealed class DiscordTokenStore
                 File.Delete(temporaryPath);
             }
         }
+    }
+
+    public Task DeleteAsync()
+    {
+        if (File.Exists(_filePath))
+        {
+            File.Delete(_filePath);
+        }
+
+        return Task.CompletedTask;
     }
 
     private static void RestrictDirectoryAccess(string path)
@@ -139,11 +171,7 @@ public sealed class DiscordTokenStore
 
     private static IReadOnlyCollection<SecurityIdentifier> GetAllowedIdentities()
     {
-        var identities = new HashSet<SecurityIdentifier>
-        {
-            new(WellKnownSidType.LocalSystemSid, null),
-            new(WellKnownSidType.BuiltinAdministratorsSid, null)
-        };
+        var identities = new HashSet<SecurityIdentifier>();
         var currentUser = WindowsIdentity.GetCurrent().User;
 
         if (currentUser is not null)

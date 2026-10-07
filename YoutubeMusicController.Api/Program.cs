@@ -5,6 +5,17 @@ using YoutubeMusicController.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var applicationDataDirectory = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+    "YoutubeMusicController");
+Directory.CreateDirectory(applicationDataDirectory);
+builder.Configuration.AddJsonFile(
+    Path.Combine(applicationDataDirectory, "settings.json"),
+    optional: true,
+    reloadOnChange: true);
+builder.Logging.AddProvider(new RollingFileLoggerProvider(
+    Path.Combine(applicationDataDirectory, "Logs")));
+
 builder.Services.AddHttpClient("Ytmd", client =>
 {
     var baseUrl = builder.Configuration["YoutubeMusic:BaseUrl"]
@@ -49,20 +60,46 @@ builder.Services.AddCors(options =>
     options.AddPolicy("Frontend", policy =>
     {
         policy
-            .AllowAnyOrigin()
+            .WithOrigins(
+                "http://localhost:5173",
+                "http://127.0.0.1:5173")
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
 });
 
-builder.Services.AddWindowsService(options =>
-{
-    options.ServiceName = "YouTube Music Controller";
-});
-
 var app = builder.Build();
 
+var localApiKey = Environment.GetEnvironmentVariable("YMC_API_KEY");
+
+if (!string.IsNullOrWhiteSpace(localApiKey))
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api") &&
+            !HttpMethods.IsOptions(context.Request.Method))
+        {
+            var suppliedKey = context.Request.Headers["X-Controller-Key"]
+                .FirstOrDefault() ?? context.Request.Query["key"].FirstOrDefault();
+
+            if (!FixedTimeEquals(localApiKey, suppliedKey))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    error = "Local controller authentication is required."
+                });
+                return;
+            }
+        }
+
+        await next(context);
+    });
+}
+
 app.UseCors("Frontend");
+app.UseDefaultFiles();
+app.UseStaticFiles();
 app.UseWebSockets(new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromSeconds(20)
@@ -158,67 +195,101 @@ app.MapGet("/api/twitch/messages", (TwitchChatService twitchChatService) =>
 app.MapGet("/api/discord/status", (DiscordBotService discordBotService) =>
     Results.Ok(discordBotService.GetStatus()));
 
-app.MapGet("/api/twitch/connect", (TwitchChatService twitchChatService) =>
+app.MapPost("/api/discord/configure", async (
+    DiscordConfigurationRequest request,
+    DiscordTokenStore tokenStore,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken cancellationToken) =>
+{
+    if (request.ApplicationId == 0 ||
+        string.IsNullOrWhiteSpace(request.BotToken) ||
+        request.BotToken.Trim().Length < 58)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [nameof(request.BotToken)] =
+                ["A valid Discord Application ID and Bot Token are required."]
+        });
+    }
+
+    var discordClient = httpClientFactory.CreateClient();
+    using var identityRequest = new HttpRequestMessage(
+        HttpMethod.Get,
+        "https://discord.com/api/v10/users/@me");
+    identityRequest.Headers.Authorization =
+        new System.Net.Http.Headers.AuthenticationHeaderValue(
+            "Bot",
+            request.BotToken.Trim());
+    using var identityResponse = await discordClient.SendAsync(
+        identityRequest,
+        cancellationToken);
+
+    if (!identityResponse.IsSuccessStatusCode)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [nameof(request.BotToken)] =
+                ["Discord rejected this Bot Token."]
+        });
+    }
+
+    using var identity = await System.Text.Json.JsonDocument.ParseAsync(
+        await identityResponse.Content.ReadAsStreamAsync(cancellationToken),
+        cancellationToken: cancellationToken);
+    var returnedId = identity.RootElement.GetProperty("id").GetString();
+
+    if (!ulong.TryParse(returnedId, out var botId) ||
+        botId != request.ApplicationId)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [nameof(request.ApplicationId)] =
+                ["The Application ID does not match this Discord Bot Token."]
+        });
+    }
+
+    await tokenStore.SaveAsync(
+        new DiscordStoredState(
+            request.ApplicationId,
+            request.GuildId,
+            request.BotToken.Trim()),
+        cancellationToken);
+    return Results.NoContent();
+});
+
+app.MapDelete("/api/discord/configure", async (
+    DiscordTokenStore tokenStore) =>
+{
+    await tokenStore.DeleteAsync();
+    return Results.NoContent();
+});
+
+app.MapPost("/api/application/shutdown", (
+    IHostApplicationLifetime lifetime) =>
+{
+    lifetime.StopApplication();
+    return Results.Accepted();
+});
+
+app.MapPost("/api/twitch/device-authorization", async (
+    TwitchChatService twitchChatService,
+    CancellationToken cancellationToken) =>
 {
     try
     {
-        return Results.Redirect(
-            twitchChatService.CreateAuthorizationUri().AbsoluteUri);
+        var verificationUri =
+            await twitchChatService.BeginDeviceAuthorizationAsync(
+                cancellationToken);
+        return Results.Ok(new
+        {
+            verificationUri = verificationUri.AbsoluteUri
+        });
     }
     catch (InvalidOperationException ex)
     {
         return Results.Problem(
             detail: ex.Message,
             statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-});
-
-app.MapGet("/api/twitch/callback", async (
-    string? code,
-    string? state,
-    string? error,
-    TwitchChatService twitchChatService,
-    ILoggerFactory loggerFactory,
-    CancellationToken cancellationToken) =>
-{
-    if (!string.IsNullOrWhiteSpace(error))
-    {
-        return TwitchCallbackPage(
-            "Twitch connection cancelled",
-            "Twitch did not grant access. You can close this window and try again when ready.",
-            success: false);
-    }
-
-    if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state))
-    {
-        return TwitchCallbackPage(
-            "Invalid Twitch response",
-            "The authorization response was incomplete. Close this window and start the connection again.",
-            success: false);
-    }
-
-    try
-    {
-        await twitchChatService.CompleteAuthorizationAsync(
-            code,
-            state,
-            cancellationToken);
-
-        return TwitchCallbackPage(
-            "Twitch connected",
-            "Authorization was encrypted and saved locally. The controller will reconnect automatically after future restarts.",
-            success: true);
-    }
-    catch (Exception ex) when (ex is not OperationCanceledException)
-    {
-        loggerFactory
-            .CreateLogger("TwitchAuthorization")
-            .LogError(ex, "Unable to complete Twitch authorization.");
-
-        return TwitchCallbackPage(
-            "Twitch connection failed",
-            "The controller could not complete authorization. Check its logs, then close this window and try again.",
-            success: false);
     }
 });
 
@@ -435,49 +506,21 @@ app.MapPost("/api/ytmd/previous", async (
     }
 });
 
-try
-{
-    await app.RunAsync();
-}
-catch (OperationCanceledException)
-    when (Microsoft.Extensions.Hosting.WindowsServices
-        .WindowsServiceHelpers.IsWindowsService())
-{
-    // Windows Service shutdown can cancel the host stop token after the
-    // service has already stopped successfully.
-}
+app.MapFallbackToFile("index.html");
 
-static IResult TwitchCallbackPage(
-    string title,
-    string message,
-    bool success)
-{
-    var accent = success ? "#4ade80" : "#fb7185";
-    var html = $$"""
-        <!doctype html>
-        <html lang="en">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>{{title}}</title>
-          <style>
-            :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-            body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111827; color: #f9fafb; }
-            main { width: min(34rem, calc(100% - 3rem)); padding: 2rem; border: 1px solid #374151; border-radius: 1rem; background: #1f2937; box-shadow: 0 1rem 3rem #0006; }
-            h1 { margin-top: 0; color: {{accent}}; }
-            p { line-height: 1.6; color: #d1d5db; }
-            button { margin-top: 1rem; padding: .7rem 1rem; border: 0; border-radius: .6rem; font: inherit; cursor: pointer; }
-          </style>
-        </head>
-        <body>
-          <main>
-            <h1>{{title}}</h1>
-            <p>{{message}}</p>
-            <button type="button" onclick="window.close()">Close window</button>
-          </main>
-        </body>
-        </html>
-        """;
+await app.RunAsync();
 
-    return Results.Content(html, "text/html; charset=utf-8");
+static bool FixedTimeEquals(string expected, string? actual)
+{
+    if (actual is null)
+    {
+        return false;
+    }
+
+    var expectedBytes = System.Text.Encoding.UTF8.GetBytes(expected);
+    var actualBytes = System.Text.Encoding.UTF8.GetBytes(actual);
+
+    return expectedBytes.Length == actualBytes.Length &&
+           System.Security.Cryptography.CryptographicOperations
+               .FixedTimeEquals(expectedBytes, actualBytes);
 }

@@ -13,10 +13,16 @@ public sealed class TwitchTokenStore
             "YoutubeMusicController.TwitchAuthorization.v1"));
 
     private readonly string _filePath;
+    private readonly string _legacyFilePath;
 
     public TwitchTokenStore(IConfiguration configuration)
     {
         _filePath = configuration["Twitch:TokenStorePath"] ?? Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "YoutubeMusicController",
+            "twitch-auth.dat");
+        _legacyFilePath = Path.Combine(
             Environment.GetFolderPath(
                 Environment.SpecialFolder.CommonApplicationData),
             "YoutubeMusicController",
@@ -28,22 +34,38 @@ public sealed class TwitchTokenStore
     public async Task<TwitchStoredState?> LoadAsync(
         CancellationToken cancellationToken = default)
     {
+        if (!File.Exists(_filePath) && File.Exists(_legacyFilePath))
+        {
+            var migrated = await ReadAsync(
+                _legacyFilePath,
+                DataProtectionScope.LocalMachine,
+                cancellationToken);
+            await SaveAsync(migrated, cancellationToken);
+            return migrated;
+        }
+
         if (!File.Exists(_filePath))
         {
             return null;
         }
 
-        var encrypted = await File.ReadAllBytesAsync(
+        return await ReadAsync(
             _filePath,
+            DataProtectionScope.CurrentUser,
             cancellationToken);
+    }
+
+    private static async Task<TwitchStoredState> ReadAsync(
+        string path,
+        DataProtectionScope scope,
+        CancellationToken cancellationToken)
+    {
+        var encrypted = await File.ReadAllBytesAsync(path, cancellationToken);
         byte[]? plaintext = null;
 
         try
         {
-            plaintext = ProtectedData.Unprotect(
-                encrypted,
-                Entropy,
-                DataProtectionScope.LocalMachine);
+            plaintext = ProtectedData.Unprotect(encrypted, Entropy, scope);
 
             return JsonSerializer.Deserialize<TwitchStoredState>(
                 plaintext)
@@ -81,7 +103,7 @@ public sealed class TwitchTokenStore
             encrypted = ProtectedData.Protect(
                 plaintext,
                 Entropy,
-                DataProtectionScope.LocalMachine);
+                DataProtectionScope.CurrentUser);
 
             await File.WriteAllBytesAsync(
                 temporaryPath,
@@ -153,11 +175,7 @@ public sealed class TwitchTokenStore
 
     private static IReadOnlyCollection<SecurityIdentifier> GetAllowedIdentities()
     {
-        var identities = new HashSet<SecurityIdentifier>
-        {
-            new(WellKnownSidType.LocalSystemSid, null),
-            new(WellKnownSidType.BuiltinAdministratorsSid, null)
-        };
+        var identities = new HashSet<SecurityIdentifier>();
         var currentUser = WindowsIdentity.GetCurrent().User;
 
         if (currentUser is not null)
@@ -171,7 +189,6 @@ public sealed class TwitchTokenStore
 
 public sealed record TwitchStoredState(
     string ClientId,
-    string ClientSecret,
     TwitchStoredAuthorization? Authorization);
 
 public sealed record TwitchStoredAuthorization(

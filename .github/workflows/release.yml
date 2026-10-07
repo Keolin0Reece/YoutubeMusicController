@@ -1,0 +1,125 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+      SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+      TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: YoutubeMusicController.Web/package-lock.json
+
+      - name: Normalize version
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION.TrimStart('v')
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Test
+        shell: pwsh
+        run: dotnet test YoutubeMusicController.slnx -c Release
+
+      - name: Audit .NET dependencies
+        shell: pwsh
+        run: dotnet list YoutubeMusicController.slnx package --vulnerable --include-transitive
+
+      - name: Audit web dependencies
+        working-directory: YoutubeMusicController.Web
+        run: npm audit --audit-level=high
+
+      - name: Publish
+        shell: pwsh
+        run: .\scripts\Publish-Windows.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Sign application binaries
+        if: ${{ env.SIGNING_CERTIFICATE != '' }}
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:SIGNING_CERTIFICATE))
+          $timestamp = if ($env:TIMESTAMP_URL) {
+            $env:TIMESTAMP_URL
+          } else {
+            'http://timestamp.digicert.com'
+          }
+          Get-ChildItem .\artifacts\controller\*.exe, .\artifacts\tray\*.exe |
+            ForEach-Object {
+              & signtool sign /fd SHA256 /td SHA256 /tr $timestamp `
+                /f $certificatePath /p $env:SIGNING_PASSWORD $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "Signing failed: $($_.Name)" }
+            }
+          Remove-Item -LiteralPath $certificatePath -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: .\scripts\Build-Installer.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Sign installer
+        if: ${{ env.SIGNING_CERTIFICATE != '' }}
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:SIGNING_CERTIFICATE))
+          $timestamp = if ($env:TIMESTAMP_URL) {
+            $env:TIMESTAMP_URL
+          } else {
+            'http://timestamp.digicert.com'
+          }
+          Get-ChildItem .\artifacts\installer\*.exe |
+            ForEach-Object {
+              & signtool sign /fd SHA256 /td SHA256 /tr $timestamp `
+                /f $certificatePath /p $env:SIGNING_PASSWORD $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "Signing failed: $($_.Name)" }
+            }
+          Remove-Item -LiteralPath $certificatePath -Force
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-FileHash .\artifacts\installer\*.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content .\artifacts\installer\SHA256SUMS.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.RELEASE_VERSION }}
+          files: |
+            artifacts/installer/*.exe
+            artifacts/installer/SHA256SUMS.txt
+          generate_release_notes: true

@@ -52,22 +52,15 @@ public sealed partial class TwitchCommandProcessor
         TwitchChatMessage chatMessage,
         CancellationToken cancellationToken)
     {
-        var match = CommandPattern().Match(chatMessage.Message.Trim());
-
-        if (!match.Success)
+        if (!TwitchCommandParser.TryParse(
+                chatMessage.Message,
+                out var parsed))
         {
             return null;
         }
 
-        var command = match.Groups["command"].Value.ToLowerInvariant();
-        var isKnownCommand = command is "song" or
-            "nowplaying" or "np" or "queue";
-        var arguments = match.Groups["arguments"].Value.Trim();
-
-        if (!isKnownCommand)
-        {
-            return null;
-        }
+        var command = parsed.Command;
+        var arguments = parsed.Arguments;
 
         await _commandGate.WaitAsync(cancellationToken);
 
@@ -222,11 +215,6 @@ public sealed partial class TwitchCommandProcessor
             ? singleLine
             : $"{singleLine[..117]}...";
     }
-
-    [GeneratedRegex(
-        @"^!(?<command>[a-z]+)(?:\s+(?<arguments>.*))?$",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex CommandPattern();
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespacePattern();

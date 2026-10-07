@@ -28,13 +28,10 @@ public sealed class TwitchChatService : BackgroundService
     private readonly TwitchTokenStore _tokenStore;
     private readonly ILogger<TwitchChatService> _logger;
     private string? _clientId;
-    private string? _clientSecret;
-    private readonly string _redirectUri;
     private readonly object _gate = new();
     private readonly List<TwitchChatMessage> _recentMessages = [];
 
-    private string? _oauthState;
-    private DateTimeOffset _oauthStateExpiresAt;
+    private CancellationTokenSource? _deviceAuthorizationCancellation;
     private TwitchAuthorization? _authorization;
     private CancellationTokenSource _authorizationChanged = new();
     private string _state = "Disconnected";
@@ -53,14 +50,9 @@ public sealed class TwitchChatService : BackgroundService
         _tokenStore = tokenStore;
         _logger = logger;
         _clientId = configuration["Twitch:ClientId"];
-        _clientSecret = configuration["Twitch:ClientSecret"];
-        _redirectUri = configuration["Twitch:RedirectUri"]
-            ?? "http://localhost:5161/api/twitch/callback";
     }
 
-    public bool IsConfigured =>
-        !string.IsNullOrWhiteSpace(_clientId) &&
-        !string.IsNullOrWhiteSpace(_clientSecret);
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(_clientId);
 
     public TwitchConnectionStatus GetStatus()
     {
@@ -84,86 +76,156 @@ public sealed class TwitchChatService : BackgroundService
         }
     }
 
-    public Uri CreateAuthorizationUri()
-    {
-        if (!IsConfigured)
-        {
-            throw new InvalidOperationException(
-                "Twitch client credentials are not configured.");
-        }
-
-        var stateBytes = RandomNumberGenerator.GetBytes(32);
-        var state = Convert.ToHexString(stateBytes);
-
-        lock (_gate)
-        {
-            _oauthState = state;
-            _oauthStateExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10);
-        }
-
-        var query = new Dictionary<string, string?>
-        {
-            ["response_type"] = "code",
-            ["client_id"] = _clientId,
-            ["redirect_uri"] = _redirectUri,
-            ["scope"] = string.Join(' ', RequiredScopes),
-            ["state"] = state
-        };
-
-        return new Uri(
-            $"https://id.twitch.tv/oauth2/authorize{QueryString.Create(query)}");
-    }
-
-    public async Task CompleteAuthorizationAsync(
-        string code,
-        string state,
+    public async Task<Uri> BeginDeviceAuthorizationAsync(
         CancellationToken cancellationToken)
     {
         if (!IsConfigured)
         {
             throw new InvalidOperationException(
-                "Twitch client credentials are not configured.");
-        }
-
-        if (!ConsumeOAuthState(state))
-        {
-            throw new InvalidOperationException(
-                "The Twitch authorization state is invalid or expired.");
+                "A Twitch Client ID is required. Open Settings and configure the public Twitch application first.");
         }
 
         var client = _httpClientFactory.CreateClient();
-        using var tokenResponse = await client.PostAsync(
+        using var response = await client.PostAsync(
+            "https://id.twitch.tv/oauth2/device",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = _clientId!,
+                ["scopes"] = string.Join(' ', RequiredScopes)
+            }),
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var device = await response.Content
+            .ReadFromJsonAsync<DeviceAuthorizationResponse>(
+                cancellationToken: cancellationToken)
+            ?? throw new InvalidOperationException(
+                "Twitch returned an empty device authorization response.");
+
+        var authorizationCancellation = new CancellationTokenSource(
+            TimeSpan.FromSeconds(device.ExpiresIn));
+
+        lock (_gate)
+        {
+            _deviceAuthorizationCancellation?.Cancel();
+            _deviceAuthorizationCancellation?.Dispose();
+            _deviceAuthorizationCancellation = authorizationCancellation;
+            _state = $"Waiting for Twitch code {device.UserCode}";
+            _connectionError = null;
+        }
+
+        _ = PollDeviceAuthorizationAsync(
+            device,
+            authorizationCancellation);
+
+        return new Uri(device.VerificationUri, UriKind.Absolute);
+    }
+
+    private async Task PollDeviceAuthorizationAsync(
+        DeviceAuthorizationResponse device,
+        CancellationTokenSource authorizationCancellation)
+    {
+        try
+        {
+            var interval = TimeSpan.FromSeconds(Math.Max(1, device.Interval));
+
+            while (!authorizationCancellation.IsCancellationRequested)
+            {
+                await Task.Delay(interval, authorizationCancellation.Token);
+                var token = await TryExchangeDeviceCodeAsync(
+                    device.DeviceCode,
+                    authorizationCancellation.Token);
+
+                if (token is null)
+                {
+                    continue;
+                }
+
+                var authorization = await CreateAuthorizationAsync(
+                    token,
+                    fallbackRefreshToken: null,
+                    authorizationCancellation.Token);
+                await SaveAuthorizationAsync(
+                    authorization,
+                    authorizationCancellation.Token);
+                SetAuthorization(authorization);
+                return;
+            }
+        }
+        catch (OperationCanceledException)
+            when (authorizationCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Twitch device authorization failed.");
+            SetConnectionState(
+                "Authorization failed",
+                false,
+                "Twitch authorization could not be completed. Try connecting again.");
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (ReferenceEquals(
+                        _deviceAuthorizationCancellation,
+                        authorizationCancellation))
+                {
+                    _deviceAuthorizationCancellation = null;
+                }
+            }
+
+            authorizationCancellation.Dispose();
+        }
+    }
+
+    private async Task<TokenResponse?> TryExchangeDeviceCodeAsync(
+        string deviceCode,
+        CancellationToken cancellationToken)
+    {
+        var client = _httpClientFactory.CreateClient();
+        using var response = await client.PostAsync(
             "https://id.twitch.tv/oauth2/token",
             new FormUrlEncodedContent(new Dictionary<string, string>
             {
                 ["client_id"] = _clientId!,
-                ["client_secret"] = _clientSecret!,
-                ["code"] = code,
-                ["grant_type"] = "authorization_code",
-                ["redirect_uri"] = _redirectUri
+                ["scopes"] = string.Join(' ', RequiredScopes),
+                ["device_code"] = deviceCode,
+                ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code"
             }),
             cancellationToken);
 
-        tokenResponse.EnsureSuccessStatusCode();
+        if (response.IsSuccessStatusCode)
+        {
+            return await response.Content.ReadFromJsonAsync<TokenResponse>(
+                cancellationToken: cancellationToken)
+                ?? throw new InvalidOperationException(
+                    "Twitch returned an empty token response.");
+        }
 
-        var token = await tokenResponse.Content.ReadFromJsonAsync<TokenResponse>(
-            cancellationToken: cancellationToken)
-            ?? throw new InvalidOperationException(
-                "Twitch returned an empty token response.");
+        var error = await response.Content
+            .ReadFromJsonAsync<TwitchErrorResponse>(
+                cancellationToken: cancellationToken);
 
-        var authorization = await CreateAuthorizationAsync(
-            token,
-            fallbackRefreshToken: null,
-            cancellationToken);
+        if (response.StatusCode == HttpStatusCode.BadRequest &&
+            string.Equals(
+                error?.Message,
+                "authorization_pending",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
 
-        await SaveAuthorizationAsync(authorization, cancellationToken);
-        SetAuthorization(authorization);
+        response.EnsureSuccessStatusCode();
+        return null;
     }
 
     public async Task DisconnectAsync()
     {
         lock (_gate)
         {
+            _deviceAuthorizationCancellation?.Cancel();
             _authorization = null;
             _connected = false;
             _state = "Disconnected";
@@ -316,8 +378,6 @@ public sealed class TwitchChatService : BackgroundService
         }
 
         _clientId ??= storedState.ClientId;
-        _clientSecret ??= storedState.ClientSecret;
-
         if (!IsConfigured || storedState.Authorization is null)
         {
             return;
@@ -466,7 +526,6 @@ public sealed class TwitchChatService : BackgroundService
             new FormUrlEncodedContent(new Dictionary<string, string>
             {
                 ["client_id"] = _clientId!,
-                ["client_secret"] = _clientSecret!,
                 ["grant_type"] = "refresh_token",
                 ["refresh_token"] = refreshToken
             }),
@@ -539,7 +598,6 @@ public sealed class TwitchChatService : BackgroundService
         _tokenStore.SaveAsync(
             new TwitchStoredState(
                 _clientId!,
-                _clientSecret!,
                 new TwitchStoredAuthorization(
                     authorization.AccessToken,
                     authorization.RefreshToken,
@@ -553,7 +611,6 @@ public sealed class TwitchChatService : BackgroundService
         IsConfigured
             ? _tokenStore.SaveAsync(new TwitchStoredState(
                 _clientId!,
-                _clientSecret!,
                 Authorization: null))
             : _tokenStore.DeleteAsync();
 
@@ -863,23 +920,6 @@ public sealed class TwitchChatService : BackgroundService
                 "Twitch returned an empty validation response.");
     }
 
-    private bool ConsumeOAuthState(string state)
-    {
-        lock (_gate)
-        {
-            var isValid =
-                _oauthState is not null &&
-                DateTimeOffset.UtcNow <= _oauthStateExpiresAt &&
-                CryptographicOperations.FixedTimeEquals(
-                    Encoding.UTF8.GetBytes(_oauthState),
-                    Encoding.UTF8.GetBytes(state));
-
-            _oauthState = null;
-            _oauthStateExpiresAt = default;
-            return isValid;
-        }
-    }
-
     private void SetAuthorization(TwitchAuthorization authorization)
     {
         lock (_gate)
@@ -977,6 +1017,16 @@ public sealed class TwitchChatService : BackgroundService
         [property: JsonPropertyName("access_token")] string AccessToken,
         [property: JsonPropertyName("refresh_token")] string? RefreshToken,
         [property: JsonPropertyName("expires_in")] int ExpiresIn);
+
+    private sealed record DeviceAuthorizationResponse(
+        [property: JsonPropertyName("device_code")] string DeviceCode,
+        [property: JsonPropertyName("user_code")] string UserCode,
+        [property: JsonPropertyName("verification_uri")] string VerificationUri,
+        [property: JsonPropertyName("expires_in")] int ExpiresIn,
+        [property: JsonPropertyName("interval")] int Interval);
+
+    private sealed record TwitchErrorResponse(
+        [property: JsonPropertyName("message")] string? Message);
 
     private sealed record ValidatedToken(
         [property: JsonPropertyName("client_id")] string ClientId,
