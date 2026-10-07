@@ -1,3 +1,5 @@
+using Discord;
+using Discord.WebSocket;
 using YoutubeMusicController.Api.Models;
 using YoutubeMusicController.Api.Services;
 
@@ -16,12 +18,31 @@ builder.Services.AddHttpClient("Ytmd", client =>
 builder.Services.AddScoped<YoutubeMusicService>();
 builder.Services.AddSingleton<YoutubeMusicRealtimeProxy>();
 builder.Services.AddSingleton<SongRepeatCooldown>();
+builder.Services.AddSingleton<SongRequestService>();
 builder.Services.AddHostedService<SongPlaybackMonitor>();
 builder.Services.AddSingleton<TwitchCommandProcessor>();
 builder.Services.AddSingleton<TwitchTokenStore>();
 builder.Services.AddSingleton<TwitchChatService>();
 builder.Services.AddHostedService(serviceProvider =>
     serviceProvider.GetRequiredService<TwitchChatService>());
+builder.Services.AddSingleton<DiscordTokenStore>();
+builder.Services.AddSingleton<DiscordRequestCooldown>();
+builder.Services.AddSingleton(_ => new DiscordSocketClient(
+    new DiscordSocketConfig
+    {
+        GatewayIntents = GatewayIntents.Guilds,
+        LogGatewayIntentWarnings = true
+    }));
+builder.Services.AddSingleton(serviceProvider => new Discord.Interactions.InteractionService(
+    serviceProvider.GetRequiredService<DiscordSocketClient>().Rest,
+    new Discord.Interactions.InteractionServiceConfig
+    {
+        DefaultRunMode = Discord.Interactions.RunMode.Sync,
+        LogLevel = LogSeverity.Info
+    }));
+builder.Services.AddSingleton<DiscordBotService>();
+builder.Services.AddHostedService(serviceProvider =>
+    serviceProvider.GetRequiredService<DiscordBotService>());
 
 builder.Services.AddCors(options =>
 {
@@ -133,6 +154,9 @@ app.MapGet("/api/twitch/status", (TwitchChatService twitchChatService) =>
 
 app.MapGet("/api/twitch/messages", (TwitchChatService twitchChatService) =>
     Results.Ok(twitchChatService.GetRecentMessages()));
+
+app.MapGet("/api/discord/status", (DiscordBotService discordBotService) =>
+    Results.Ok(discordBotService.GetStatus()));
 
 app.MapGet("/api/twitch/connect", (TwitchChatService twitchChatService) =>
 {

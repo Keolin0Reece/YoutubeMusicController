@@ -7,7 +7,7 @@ namespace YoutubeMusicController.Api.Services;
 public sealed partial class TwitchCommandProcessor
 {
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly SongRepeatCooldown _songRepeatCooldown;
+    private readonly SongRequestService _songRequestService;
     private readonly ILogger<TwitchCommandProcessor> _logger;
     private readonly SemaphoreSlim _commandGate = new(1, 1);
     private readonly ConcurrentDictionary<string, DateTimeOffset>
@@ -20,12 +20,12 @@ public sealed partial class TwitchCommandProcessor
 
     public TwitchCommandProcessor(
         IServiceScopeFactory scopeFactory,
-        SongRepeatCooldown songRepeatCooldown,
+        SongRequestService songRequestService,
         IConfiguration configuration,
         ILogger<TwitchCommandProcessor> logger)
     {
         _scopeFactory = scopeFactory;
-        _songRepeatCooldown = songRepeatCooldown;
+        _songRequestService = songRequestService;
         _logger = logger;
         _songRequestsEnabled = configuration.GetValue(
             "Twitch:Commands:SongRequestsEnabled",
@@ -82,7 +82,6 @@ public sealed partial class TwitchCommandProcessor
                 "song" => await HandleSongRequestAsync(
                     chatMessage,
                     arguments,
-                    youtubeMusicService,
                     cancellationToken),
                 "nowplaying" or "np" => await HandleNowPlayingAsync(
                     youtubeMusicService,
@@ -118,7 +117,6 @@ public sealed partial class TwitchCommandProcessor
     private async Task<string> HandleSongRequestAsync(
         TwitchChatMessage chatMessage,
         string query,
-        YoutubeMusicService youtubeMusicService,
         CancellationToken cancellationToken)
     {
         if (!_songRequestsEnabled)
@@ -162,60 +160,28 @@ public sealed partial class TwitchCommandProcessor
 
         _lastSongRequestAt = now;
 
-        var search = await youtubeMusicService.SearchAsync(
-            new SearchRequest(query),
-            cancellationToken);
-        var result = search.Results.FirstOrDefault(item =>
-            item.MediaType == "Song");
+        var outcome = await _songRequestService.QueueAsync(
+            query,
+            allowCloseVideoMatches: false,
+            preferredVideoId: null,
+            cancellationToken: cancellationToken);
 
-        if (result is null)
+        if (outcome.Failure == SongRequestFailure.NotFound)
         {
             return $"@{chatMessage.DisplayName} I couldn't find a playable song for “{Sanitize(query)}”.";
         }
 
-        if (!_songRepeatCooldown.TryReserve(
-                result.VideoId,
-                out var reservation,
-                out var repeatRemaining))
+        if (outcome.Failure == SongRequestFailure.RepeatBlocked)
         {
-            return $"@{chatMessage.DisplayName} “{Sanitize(result.Title)}”: {_songRepeatCooldown.GetBlockedMessage(repeatRemaining)}";
-        }
-
-        try
-        {
-            await youtubeMusicService.AddToQueueAsync(
-                result.VideoId,
-                cancellationToken);
-        }
-        catch
-        {
-            _songRepeatCooldown.Cancel(reservation);
-            throw;
+            return $"@{chatMessage.DisplayName} “{Sanitize(outcome.Title)}”: {outcome.FailureMessage}";
         }
 
         _userSongCooldowns[chatMessage.UserId] = now;
-
-        QueueItem? queuedItem = null;
-
-        try
-        {
-            var queueAfter = await youtubeMusicService.GetQueueAsync(
-                cancellationToken);
-            queuedItem = queueAfter.Items.LastOrDefault(item =>
-                item.VideoId == result.VideoId);
-        }
-        finally
-        {
-            _songRepeatCooldown.ConfirmQueued(
-                reservation,
-                queuedItem?.InstanceId);
-        }
-        var artist = result.Artists.FirstOrDefault() ?? "Unknown artist";
-        var position = queuedItem is null
+        var position = outcome.Position is null
             ? string.Empty
-            : $" at position {queuedItem.Index + 1}";
+            : $" at position {outcome.Position}";
 
-        return $"@{chatMessage.DisplayName} added “{Sanitize(result.Title)}” — {Sanitize(artist)}{position}.";
+        return $"@{chatMessage.DisplayName} added “{Sanitize(outcome.Title)}” — {Sanitize(outcome.Artist)}{position}.";
     }
 
     private static async Task<string> HandleNowPlayingAsync(

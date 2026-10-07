@@ -16,6 +16,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _stopItem;
     private readonly ToolStripMenuItem _killItem;
     private readonly ToolStripMenuItem _authorizeItem;
+    private readonly ToolStripMenuItem _configureDiscordItem;
     private readonly System.Windows.Forms.Timer _statusTimer;
 
     private bool _operationInProgress;
@@ -44,6 +45,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             "Connect Twitch",
             null,
             (_, _) => OpenTwitchAuthorization());
+        _configureDiscordItem = new ToolStripMenuItem(
+            "Configure Discord",
+            null,
+            (_, _) => ConfigureDiscord());
 
         var menu = new ContextMenuStrip();
         menu.Items.AddRange(
@@ -55,6 +60,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _killItem,
             new ToolStripSeparator(),
             _authorizeItem,
+            _configureDiscordItem,
             new ToolStripSeparator(),
             new ToolStripMenuItem(
                 "Exit tray",
@@ -298,6 +304,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _serviceInstalled &&
             !stopped;
         _authorizeItem.Enabled = !_operationInProgress && running;
+        _configureDiscordItem.Enabled = !_operationInProgress;
 
         _notifyIcon.Icon = _serviceStatus switch
         {
@@ -325,6 +332,32 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             FileName = TwitchAuthorizationUrl,
             UseShellExecute = true
+        });
+    }
+
+    private static void ConfigureDiscord()
+    {
+        var scriptPath = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "Configure-Discord.ps1"));
+
+        if (!File.Exists(scriptPath))
+        {
+            MessageBox.Show(
+                $"Discord setup script was not found at {scriptPath}.",
+                "YouTube Music Controller",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+            UseShellExecute = true,
+            Verb = "runas"
         });
     }
 

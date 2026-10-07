@@ -14,6 +14,8 @@ $serviceDirectory = Join-Path $installRoot 'Service'
 $trayDirectory = Join-Path $installRoot 'Tray'
 $serviceExecutable = Join-Path $serviceDirectory 'YoutubeMusicController.Api.exe'
 $trayExecutable = Join-Path $trayDirectory 'YoutubeMusicController.Tray.exe'
+$discordSetupSource = Join-Path $repositoryRoot 'scripts\Configure-Discord.ps1'
+$discordSetupDestination = Join-Path $installRoot 'Configure-Discord.ps1'
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -85,6 +87,7 @@ New-Item -ItemType Directory -Path $serviceDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $trayDirectory -Force | Out-Null
 Copy-Item -Path (Join-Path $serviceSource '*') -Destination $serviceDirectory -Recurse -Force
 Copy-Item -Path (Join-Path $traySource '*') -Destination $trayDirectory -Recurse -Force
+Copy-Item -LiteralPath $discordSetupSource -Destination $discordSetupDestination -Force
 
 $binaryPath = (
     "`"$serviceExecutable`" " +
@@ -97,7 +100,7 @@ if (-not $existingService) {
         -Name $serviceName `
         -BinaryPathName $binaryPath `
         -DisplayName $displayName `
-        -Description 'Controls YouTube Music through Twitch chat.' `
+        -Description 'Controls YouTube Music through Twitch and Discord.' `
         -StartupType Manual | Out-Null
 }
 else {
@@ -120,7 +123,7 @@ else {
         throw "Unable to update the Windows Service configuration. sc.exe exited with $LASTEXITCODE."
     }
 
-    & sc.exe description $serviceName 'Controls YouTube Music through Twitch chat.' | Out-Host
+    & sc.exe description $serviceName 'Controls YouTube Music through Twitch and Discord.' | Out-Host
 
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to update the Windows Service description. sc.exe exited with $LASTEXITCODE."
@@ -142,5 +145,6 @@ if ($wasRunning) {
 
 Write-Host "Installed service: $serviceExecutable"
 Write-Host "Installed tray app: $trayExecutable"
+Write-Host "Installed Discord setup: $discordSetupDestination"
 Write-Host "Created startup shortcut: $shortcutPath"
 Write-Host 'Start the tray app from the Start menu shortcut or sign out and back in.'

@@ -20,6 +20,15 @@ should only be used if the normal stop action does not work.
 The tray icon starts automatically when the current user signs in. The service
 uses the **Manual** startup type, so it does not run until requested.
 
+If you close the tray application, start it again with:
+
+```powershell
+& 'C:\Program Files\YoutubeMusicController\Tray\YoutubeMusicController.Tray.exe'
+```
+
+This only restores the tray icon. It does not automatically start or stop the
+controller service; use the tray menu for that.
+
 ## Publish and install an update
 
 From the repository root:

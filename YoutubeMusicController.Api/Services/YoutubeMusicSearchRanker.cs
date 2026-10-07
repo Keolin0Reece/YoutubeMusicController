@@ -26,6 +26,86 @@ internal static class YoutubeMusicSearchRanker
         return merged;
     }
 
+    public static bool IsCloseMatch(string query, SearchResult result)
+    {
+        if (TrySplitTitleAndArtist(
+                query,
+                out var requestedTitle,
+                out var requestedArtist))
+        {
+            return IsCloseTextMatch(requestedTitle, result.Title) &&
+                   result.Artists.Any(artist =>
+                       IsCloseTextMatch(requestedArtist, artist));
+        }
+
+        var normalizedQuery = Normalize(query);
+        var searchableText = string.Join(
+            ' ',
+            new[] { Normalize(result.Title) }
+                .Concat(result.Artists.Select(Normalize)));
+
+        if (IsCloseTextMatch(normalizedQuery, result.Title))
+        {
+            return true;
+        }
+
+        var queryTokens = normalizedQuery
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        return queryTokens.Length >= 2 &&
+               queryTokens.All(token => ContainsToken(searchableText, token));
+    }
+
+    private static bool IsCloseTextMatch(string expected, string actual)
+    {
+        var normalizedExpected = Normalize(expected);
+        var normalizedActual = Normalize(actual);
+
+        if (normalizedExpected.Length < 4 || normalizedActual.Length < 4)
+        {
+            return false;
+        }
+
+        if (normalizedExpected == normalizedActual ||
+            normalizedActual.Contains(normalizedExpected, StringComparison.Ordinal) ||
+            normalizedExpected.Contains(normalizedActual, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var expectedTokens = normalizedExpected
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var actualTokens = normalizedActual
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return expectedTokens.Length >= 2 &&
+               expectedTokens.All(actualTokens.Contains);
+    }
+
+    private static bool TrySplitTitleAndArtist(
+        string query,
+        out string title,
+        out string artist)
+    {
+        const string Connector = " by ";
+        var connectorIndex = query.LastIndexOf(
+            Connector,
+            StringComparison.OrdinalIgnoreCase);
+
+        if (connectorIndex <= 0 ||
+            connectorIndex + Connector.Length >= query.Length)
+        {
+            title = string.Empty;
+            artist = string.Empty;
+            return false;
+        }
+
+        title = query[..connectorIndex].Trim();
+        artist = query[(connectorIndex + Connector.Length)..].Trim();
+        return title.Length > 0 && artist.Length > 0;
+    }
+
     private static int GetScore(string query, SearchResult result)
     {
         var normalizedQuery = Normalize(query);
